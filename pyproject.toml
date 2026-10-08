@@ -1,17 +1,19 @@
 [project]
 name = "tokenizerlab"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible tokenizer experiments: deterministic, inspectable corpus building for tokenizer training."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+# Floors are the oldest releases that have the APIs used and wheels for Python 3.11.
 parquet = [
-    "pyarrow>=25.0.1",
+    "pyarrow>=10.0",  # Table.from_pylist (7.0), iter_batches (3.0); 3.11 wheels from 10.0
 ]
 hf = [
-    "datasets>=5.1.0",
+    "datasets>=2.0",  # load_dataset(streaming=True, revision=...)
+    "huggingface_hub>=0.10",  # HfApi().dataset_info(revision=...).sha, imported directly
 ]
 
 [dependency-groups]
@@ -19,7 +21,7 @@ dev = [
     "hypothesis>=6.168.5",
     "mypy>=2.4.0",
     "pre-commit>=4.6.2",
-    "pyarrow>=25.0.1",
+    "pyarrow>=10.0",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]
