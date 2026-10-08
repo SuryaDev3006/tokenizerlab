@@ -1,21 +1,23 @@
 """DocumentStream: a lazy, re-iterable stream of Documents, and how its errors are handled.
 
-Each pass resets a stream's `errors`, `skipped` and `info`, which are complete once the pass
-has been fully consumed.
+Each pass collects its errors, skipped files and info in its own PassReport; the stream
+publishes it as `last_pass` once the pass is complete.
 """
 
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from enum import Enum, StrEnum
+from pathlib import Path
 from typing import Any, Protocol
 
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers.options import OnError, ReaderConfig
 from tokenizerlab.errors import TokenizerLabError
 
-RunPass = Callable[["DocumentStream"], Iterator[Document]]
+RunPass = Callable[["PassReport"], Iterator[Document]]
 
 
 class ErrorLevel(StrEnum):
@@ -125,44 +127,115 @@ ERROR_POLICIES: dict[OnError, ErrorPolicy] = {
 }
 
 
+# ---------------------------------------------------------------- what a stream knows
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTraits:
+    """What is known about a source before it is read."""
+
+    reuse: Reuse = Reuse.REPEATABLE
+    reproducible: bool = True  # False if the reader config is not enough to read it again
+    paths: tuple[Path, ...] = ()  # filesystem locations the source reads
+
+    @classmethod
+    def combine(cls, traits: Iterable[SourceTraits]) -> SourceTraits:
+        """The traits of several sources read one after another."""
+        traits = list(traits)
+        one_shot = any(trait.reuse is Reuse.ONE_SHOT for trait in traits)
+        return cls(
+            reuse=Reuse.ONE_SHOT if one_shot else Reuse.REPEATABLE,
+            reproducible=all(trait.reproducible for trait in traits),
+            paths=tuple(path for trait in traits for path in trait.paths),
+        )
+
+
+class PassReport:
+    """What one pass learned besides its Documents. Every pass gets its own report, so
+    passes that overlap (e.g. zip over two corpora sharing a stream) never mix results."""
+
+    def __init__(self, policy: ErrorPolicy) -> None:
+        """Start an empty report that handles errors with `policy`."""
+        self.policy = policy
+        self.errors: list[ReadError] = []
+        self.skipped: list[str] = []  # unsupported files found during discovery
+        self.info: dict[str, dict[str, Any]] = {}  # per-source facts, e.g. resolved HF revision
+        self.unpinned: list[str] = []  # sources read without an exact revision
+
+    def record_error(self, error: ReadError) -> None:
+        """Handle one error according to the error policy."""
+        self.policy.record(error, self.errors)
+
+    def absorb(self, other: PassReport) -> None:
+        """Add another report's findings, e.g. a chained child's."""
+        self.errors += other.errors
+        self.skipped += other.skipped
+        self.info.update(other.info)
+        self.unpinned += other.unpinned
+
+
 # ---------------------------------------------------------------- DocumentStream
 
 
 class DocumentStream:
-    """A lazy, re-iterable stream of Documents."""
+    """A lazy, re-iterable stream of Documents.
+
+    `errors`, `skipped` and `info` describe the most recent complete pass.
+    """
 
     def __init__(
         self,
         run: RunPass,
         list_source_names: Callable[[], list[str]],
         on_error: OnError,
-        reuse: Reuse = Reuse.REPEATABLE,
+        traits: SourceTraits | None = None,
     ):
-        """Wrap `run`, which yields one pass of Documents, and `list_source_names`."""
+        """Wrap `run`, which yields one pass of Documents into a PassReport."""
         self._run = run
         self._list_source_names = list_source_names
         self.on_error = on_error
         self.error_policy = ERROR_POLICIES[on_error]
-        self.reuse = reuse
-        self.errors: list[ReadError] = []
-        self.skipped: list[str] = []  # unsupported files found during discovery
-        self.info: dict[str, dict[str, Any]] = {}  # per-source facts, e.g. resolved HF revision
+        self.traits = traits or SourceTraits()
         self.config: ReaderConfig = {}  # read()'s arguments, recorded in corpus manifests
+        self.last_pass = PassReport(self.error_policy)  # empty until a pass completes
         self._state = _PassState.READY
 
     def __iter__(self) -> Iterator[Document]:
-        """Start a fresh pass with empty errors, skipped files and info."""
+        """One pass with its own report, published when the pass is complete."""
         self._start_pass()
-        self.errors, self.skipped, self.info = [], [], {}
-        return self._run(self)
+        report = PassReport(self.error_policy)
+        yield from self._run(report)
+        self.last_pass = report
+
+    @property
+    def errors(self) -> list[ReadError]:
+        """Errors of the most recent complete pass."""
+        return self.last_pass.errors
+
+    @property
+    def skipped(self) -> list[str]:
+        """Unsupported files found by the most recent complete pass."""
+        return self.last_pass.skipped
+
+    @property
+    def info(self) -> dict[str, dict[str, Any]]:
+        """Per-source facts from the most recent complete pass."""
+        return self.last_pass.info
+
+    @property
+    def reuse(self) -> Reuse:
+        """Whether the source can be read more than once."""
+        return self.traits.reuse
+
+    @property
+    def reproducible(self) -> bool:
+        """Whether the reader config can re-read exactly this data: not for in-memory
+        sources, nor when the last pass could not pin a hub dataset's revision."""
+        return self.traits.reproducible and not self.last_pass.unpinned
 
     def source_names(self) -> list[str]:
         """The names of every source this stream reads, in reading order."""
         return self._list_source_names()
-
-    def record_error(self, error: ReadError) -> None:
-        """Handle one error according to the stream's error policy."""
-        self.error_policy.record(error, self.errors)
 
     def _start_pass(self) -> None:
         """READY → READY for repeatable streams; READY → CONSUMED for a one-shot stream."""

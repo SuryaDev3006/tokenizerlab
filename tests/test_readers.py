@@ -191,8 +191,33 @@ def test_hub_datasets_are_pinned_or_warned() -> None:
 
     pinned = reader(_PinnedHub()).open("hf:org/data", None, options)
     assert [doc.source for doc in pinned] == ["hf:org/data/default:train"] * 2
-    assert pinned.info == {"hf:org/data/default:train": {"revision": "abc123"}}
+    assert pinned.info == {"hf:org/data/default:train": {"revision": "abc123", "pinned": True}}
+    assert pinned.reproducible
 
     offline = reader(_OfflineHub()).open("hf:org/data", None, options)
     with pytest.warns(UserWarning, match="unpinned"):
         assert [doc.text for doc in offline] == ["one", "two"]
+    assert not offline.reproducible  # the same revision cannot be promised next time
+
+
+def test_only_sources_that_can_be_read_again_are_reproducible(tmp_path: Path) -> None:
+    """Files can be re-read from the reader config; in-memory data cannot."""
+    _write(tmp_path, {"a.txt": b"a"})
+
+    assert read(tmp_path).reproducible
+    assert not read(["a"], name="toy").reproducible
+    assert not read(lambda: ["a"], name="toy").reproducible
+    assert not read([read(tmp_path, name="files"), read(["a"], name="toy")]).reproducible
+
+
+def test_overlapping_passes_keep_separate_reports(tmp_path: Path) -> None:
+    """Two passes over one stream at the same time each see only their own errors."""
+    lines = [b'{"text": "a"}', b"not json", b'{"text": "b"}', b"not json"]
+    _write(tmp_path, {"d.jsonl": b"\n".join(lines) + b"\n"})
+    stream = read(tmp_path / "d.jsonl", on_error="skip")
+
+    first, second = iter(stream), iter(stream)
+    interleaved = [(a.text, b.text) for a, b in zip(first, second, strict=True)]
+    assert interleaved == [("a", "a"), ("b", "b")]
+    assert list(first) == list(second) == []  # finish both passes
+    assert [error.position for error in stream.errors] == [1, 3]

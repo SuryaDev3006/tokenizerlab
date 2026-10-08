@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +22,7 @@ from typing import Protocol
 
 from tokenizerlab.adapters import ColumnType, ParquetPort, PyArrowParquet, Row
 from tokenizerlab.data.document import Document
-from tokenizerlab.data.readers import DocumentStream, OnError
+from tokenizerlab.data.readers import DocumentStream, OnError, PassReport, SourceTraits
 from tokenizerlab.data.stats import (
     CorpusStats,
     FileInfo,
@@ -58,6 +58,10 @@ ROW_GROUP_MAX_CHARS = 64 * 2**20
 
 class CorpusExistsError(TokenizerLabError):
     """save() would overwrite an existing corpus without overwrite=True."""
+
+
+class UnsafeDestinationError(TokenizerLabError):
+    """save() would replace something that is not a saved corpus, or the data being read."""
 
 
 class MetadataNotSerializableError(TokenizerLabError):
@@ -114,6 +118,51 @@ def row_groups(documents: Iterable[Document]) -> Iterator[list[Row]]:
             group, chars = [], 0
     if group:
         yield group
+
+
+# ---------------------------------------------------------------- destinations
+
+
+def check_destination(
+    destination: Path,
+    source_paths: Sequence[Path],
+    *,
+    overwrite: bool,
+) -> None:
+    """Refuse a save that could destroy data.
+
+    The destination may not contain, be, or lie inside any path being read, and an existing
+    destination is replaced only with overwrite=True and only if it is itself a saved corpus.
+    """
+    _refuse_overlap(destination, source_paths)
+    if not destination.exists():
+        return
+    if not overwrite:
+        raise CorpusExistsError(f"{destination} exists; pass overwrite=True to replace it")
+    _require_saved_corpus(destination)
+
+
+def _refuse_overlap(destination: Path, source_paths: Sequence[Path]) -> None:
+    """The destination must not overlap any source path."""
+    target = destination.resolve()
+    for source in source_paths:
+        source_path = source.resolve()
+        if target.is_relative_to(source_path) or source_path.is_relative_to(target):
+            raise UnsafeDestinationError(
+                f"Refusing to save to {destination}: it overlaps the source {source}, "
+                "which is being read. Save somewhere else."
+            )
+
+
+def _require_saved_corpus(destination: Path) -> None:
+    """An existing destination must hold a saved corpus and nothing else."""
+    corpus_files = {CORPUS_FILE, MANIFEST_FILE}
+    entries = {entry.name for entry in destination.iterdir()} if destination.is_dir() else None
+    if entries is None or MANIFEST_FILE not in entries or not entries <= corpus_files:
+        raise UnsafeDestinationError(
+            f"Refusing to replace {destination}: it is not a saved tokenizerlab corpus "
+            f"(expected only {sorted(corpus_files)})."
+        )
 
 
 @contextmanager
@@ -174,10 +223,15 @@ def verifying_loader(rows: Iterable[Row], manifest: SavedManifest) -> Iterator[D
 
 
 class SavableCorpus(Protocol):
-    """What the store needs from a corpus: its documents, then how they were selected."""
+    """What the store needs from a corpus: where it reads, its documents, and then how
+    they were selected."""
 
     def __iter__(self) -> Iterator[Document]:
         """One pass over the documents."""
+        ...
+
+    def source_paths(self) -> tuple[Path, ...]:
+        """The filesystem paths the corpus reads from."""
         ...
 
     def provenance(self) -> Provenance:
@@ -202,8 +256,7 @@ class CorpusStore:
 
     def save(self, corpus: SavableCorpus, destination: Path, *, overwrite: bool) -> CorpusStats:
         """Write the corpus in one pass, atomically; return the stats of that pass."""
-        if destination.exists() and not overwrite:
-            raise CorpusExistsError(f"{destination} exists; pass overwrite=True to replace it")
+        check_destination(destination, corpus.source_paths(), overwrite=overwrite)
 
         accumulator = StatsAccumulator()
         with replace_directory_atomically(destination) as directory:
@@ -226,12 +279,13 @@ class CorpusStore:
         manifest = decode_manifest(manifest_file.read_text(encoding="utf-8"), str(manifest_file))
         corpus_file = directory / CORPUS_FILE
 
-        def run(stream: DocumentStream) -> Iterator[Document]:
+        def run(report: PassReport) -> Iterator[Document]:
             """One pass over the saved rows."""
             return loader(self._parquet.read_rows(corpus_file), manifest)
 
         # on_error=RAISE: a damaged saved corpus must fail loudly, never lose rows quietly.
-        stream = DocumentStream(run, lambda: [str(corpus_file)], OnError.RAISE)
+        traits = SourceTraits(paths=(directory,))
+        stream = DocumentStream(run, lambda: [str(corpus_file)], OnError.RAISE, traits)
         return OpenedCorpus(stream, manifest)
 
 

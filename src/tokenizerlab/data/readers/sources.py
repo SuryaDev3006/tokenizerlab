@@ -14,7 +14,7 @@ from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers.formats import FormatRegistry
 from tokenizerlab.data.readers.options import ReadOptions
 from tokenizerlab.data.readers.rows import Source
-from tokenizerlab.data.readers.stream import DocumentStream, Reuse
+from tokenizerlab.data.readers.stream import DocumentStream, PassReport, Reuse, SourceTraits
 from tokenizerlab.errors import ConfigurationError
 from tokenizerlab.shared.source_names import HUB_PREFIX, hub_source_name, is_hub_source
 
@@ -139,12 +139,12 @@ class PathHandler:
             self._discovery.discover(path, options)  # fail now on a missing path or unknown type
         prefix = f"{name}/" if name else ""
 
-        def run(stream: DocumentStream) -> Iterator[Document]:
+        def run(report: PassReport) -> Iterator[Document]:
             """Parse each discovered file in order."""
             discovery = self._discovery.discover(path, options)
-            stream.skipped = [prefix + relative_path for relative_path in discovery.skipped]
+            report.skipped = [prefix + relative_path for relative_path in discovery.skipped]
             for file in discovery.files:
-                file_source = Source(prefix + file.relative_path, options, stream)
+                file_source = Source(prefix + file.relative_path, options, report)
                 parser = self._formats.parser(file.format)
                 yield from file_source.guard(parser(file.path, file_source))
 
@@ -153,7 +153,8 @@ class PathHandler:
             discovery = self._discovery.discover(path, options)
             return [prefix + file.relative_path for file in discovery.files]
 
-        return DocumentStream(run, list_source_names, options.on_error)
+        traits = SourceTraits(paths=(path,))
+        return DocumentStream(run, list_source_names, options.on_error, traits)
 
 
 # ---------------------------------------------------------------- dataset hubs
@@ -175,18 +176,22 @@ class HubHandler:
         dataset = str(source).removeprefix(HUB_PREFIX)
         source_name = hub_source_name(dataset, options.config, options.split)
 
-        def run(stream: DocumentStream) -> Iterator[Document]:
+        def run(report: PassReport) -> Iterator[Document]:
             """Turn the dataset rows into Documents."""
-            hub_source = Source(source_name, options, stream)
-            request = self._pinned_request(dataset, options)
-            stream.info[source_name] = {"revision": request.revision}
+            hub_source = Source(source_name, options, report)
+            request = self._request(dataset, options, report)
             rows = enumerate(self._hub.stream_rows(request))
             yield from hub_source.guard(hub_source.documents_from_rows(rows))
 
         return DocumentStream(run, lambda: [source_name], options.on_error)
 
-    def _pinned_request(self, dataset: str, options: ReadOptions) -> DatasetRequest:
-        """The split at its exact commit, so 'the same dataset' stays the same data."""
+    def _request(self, dataset: str, options: ReadOptions, report: PassReport) -> DatasetRequest:
+        """The split at its exact commit, so 'the same dataset' stays the same data.
+
+        Records the revision in the report; an unpinned read is warned about and marked,
+        because the manifest cannot promise the same data next time.
+        """
+        source_name = hub_source_name(dataset, options.config, options.split)
         try:
             revision: str | None = self._hub.resolve_revision(dataset, options.revision)
         except RevisionResolutionError as error:
@@ -196,6 +201,11 @@ class HubHandler:
                 stacklevel=4,
             )
             revision = options.revision
+            report.unpinned.append(source_name)
+        report.info[source_name] = {
+            "revision": revision,
+            "pinned": source_name not in report.unpinned,
+        }
         return DatasetRequest(dataset, options.config, options.split, revision)
 
 
@@ -219,14 +229,18 @@ class IterableHandler:
             )
         source_name = name
 
-        def run(stream: DocumentStream) -> Iterator[Document]:
+        def run(report: PassReport) -> Iterator[Document]:
             """Turn the items of one pass into Documents."""
-            item_source = Source(source_name, options, stream)
+            item_source = Source(source_name, options, report)
             items = _items_of_one_pass(source)
             yield from item_source.guard(item_source.documents_from_items(items))
 
-        reuse = Reuse.ONE_SHOT if isinstance(source, Iterator) else Reuse.REPEATABLE
-        return DocumentStream(run, lambda: [source_name], options.on_error, reuse)
+        # In-memory data is not recorded anywhere, so the manifest cannot re-read it.
+        traits = SourceTraits(
+            reuse=Reuse.ONE_SHOT if isinstance(source, Iterator) else Reuse.REPEATABLE,
+            reproducible=False,
+        )
+        return DocumentStream(run, lambda: [source_name], options.on_error, traits)
 
 
 def _items_of_one_pass(source: object) -> Iterable[Any]:

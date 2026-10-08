@@ -33,7 +33,7 @@ from tokenizerlab.data.readers.sources import (
     PathHandler,
     SourceResolver,
 )
-from tokenizerlab.data.readers.stream import DocumentStream, Reuse
+from tokenizerlab.data.readers.stream import DocumentStream, PassReport, SourceTraits
 from tokenizerlab.errors import ConfigurationError
 
 
@@ -88,17 +88,14 @@ def chain(streams: list[DocumentStream], on_error: OnError) -> DocumentStream:
             f"Sources would share names {duplicates[:5]}; give each source a distinct name=..."
         )
 
-    def run(combined: DocumentStream) -> Iterator[Document]:
-        """Yield each stream in turn, then collect its errors, skipped files and info."""
+    def run(report: PassReport) -> Iterator[Document]:
+        """Yield each stream in turn, then add its pass report to this one."""
         for stream in streams:
             yield from stream
-            combined.errors += stream.errors
-            combined.skipped += stream.skipped
-            combined.info.update(stream.info)
+            report.absorb(stream.last_pass)
 
-    one_shot = any(stream.reuse is Reuse.ONE_SHOT for stream in streams)
-    reuse = Reuse.ONE_SHOT if one_shot else Reuse.REPEATABLE
-    return DocumentStream(run, lambda: names, on_error, reuse)
+    traits = SourceTraits.combine(stream.traits for stream in streams)
+    return DocumentStream(run, lambda: names, on_error, traits)
 
 
 @functools.cache

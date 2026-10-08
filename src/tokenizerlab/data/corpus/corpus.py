@@ -80,7 +80,7 @@ class Corpus:
         self._stream = stream
         self._link: _Link | None = None  # None for the source node
         self._step_index = 0  # position in the history; part of every selection hash
-        self._entry = HistoryEntry("read", stream.config)
+        self._entry: HistoryEntry | None = None  # None: the read step, recorded from the stream
         self._parent_info: ParentInfo | None = None  # set for a corpus loaded from disk
         self._bytes_by_lang: Counter[str | None] | None = None  # cached pre-pass result
         self._last_output: Counts | None = None  # from the last complete pass
@@ -185,7 +185,8 @@ class Corpus:
             if counts_out is None:
                 raise IncompletePassError("No complete pass yet: iterate the corpus fully first")
             # The source step has no input of its own: what it reads is what it yields.
-            counts = StepCounts.between(node._entry.op, counts_in or counts_out, counts_out)
+            op = node._history_entry().op
+            counts = StepCounts.between(op, counts_in or counts_out, counts_out)
             records.append(StepRecord(counts, node._last_selection))
             counts_in = counts_out
         return tuple(records)
@@ -195,7 +196,18 @@ class Corpus:
     @property
     def history(self) -> list[HistoryEntry]:
         """Every step from the source onward, with its parameters."""
-        return [node._entry for node in self._lineage()]
+        return [node._history_entry() for node in self._lineage()]
+
+    def _history_entry(self) -> HistoryEntry:
+        """This node's history entry. The read step is built from the stream when asked,
+        because whether it is reproducible can depend on its last pass."""
+        if self._entry is not None:
+            return self._entry
+        return HistoryEntry("read", self._stream.config, self._stream.reproducible)
+
+    def source_paths(self) -> tuple[Path, ...]:
+        """The filesystem paths this corpus reads; save() refuses to write over them."""
+        return self._stream.traits.paths
 
     def provenance(self) -> Provenance:
         """How this corpus was built and what each step did, from the last complete pass."""
@@ -250,6 +262,9 @@ class Corpus:
         corpus = cls(opened.stream)
         corpus._entry = HistoryEntry("load", {"path": str(directory), "fingerprint": fingerprint})
         corpus._parent_info = opened.manifest.as_parent()
+        # Continue the step numbering of everything before the save, so a sample after
+        # loading never reuses the selection values of a sample applied before saving.
+        corpus._step_index = opened.manifest.steps_so_far
         return corpus
 
 

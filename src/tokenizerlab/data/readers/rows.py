@@ -7,7 +7,7 @@ from typing import Any
 
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers.options import ReadOptions
-from tokenizerlab.data.readers.stream import DocumentStream, ErrorLevel, ReadError
+from tokenizerlab.data.readers.stream import ErrorLevel, PassReport, ReadError
 from tokenizerlab.errors import TokenizerLabError
 
 
@@ -99,11 +99,11 @@ class RowParser:
 class Source:
     """One named source during a pass: builds its Documents and records its errors."""
 
-    def __init__(self, name: str, options: ReadOptions, stream: DocumentStream):
-        """Bind the source name, its read options and the stream collecting its errors."""
+    def __init__(self, name: str, options: ReadOptions, report: PassReport):
+        """Bind the source name, its read options and the report of the current pass."""
         self.name = name
         self.options = options
-        self.stream = stream
+        self.report = report
         self._row_parser = RowParser(name, options)
 
     def document(self, text: str, position: int) -> Document:
@@ -128,13 +128,13 @@ class Source:
             except ReadError as error:
                 if error.level is ErrorLevel.FILE:
                     raise
-                self.stream.record_error(error)
+                self.report.record_error(error)
                 continue
             yield document
 
     def record_row_error(self, message: str, position: int) -> None:
         """Record one bad row of this source."""
-        self.stream.record_error(ReadError(self.name, message, position))
+        self.report.record_error(ReadError(self.name, message, position))
 
     def missing_text_field_error(self, available_fields: Iterable[Any]) -> ReadError:
         """The file-level error for a text_field that this source does not have."""
@@ -142,18 +142,18 @@ class Source:
 
     def guard(self, documents: Iterator[Document]) -> Iterator[Document]:
         """Record a whole-source failure instead of ending the pass; warn once about bad rows."""
-        first_new_error = len(self.stream.errors)
+        first_new_error = len(self.report.errors)
         try:
             yield from documents
         except ReadError as error:
             if error.level is not ErrorLevel.FILE:  # row errors only propagate with on_error=raise
                 raise
-            self.stream.record_error(error)
+            self.report.record_error(error)
         except TokenizerLabError:
             raise  # e.g. a missing optional dependency: a setup problem, not a bad file
         except Exception as error:  # noqa: BLE001 - unreadable/corrupt file: recorded, not silenced
             message = f"{type(error).__name__}: {error}"
-            self.stream.record_error(ReadError(self.name, message, level=ErrorLevel.FILE))
-        new_errors = self.stream.errors[first_new_error:]
+            self.report.record_error(ReadError(self.name, message, level=ErrorLevel.FILE))
+        new_errors = self.report.errors[first_new_error:]
         bad_rows = [error for error in new_errors if error.level is ErrorLevel.ROW]
-        self.stream.error_policy.summarize_bad_rows(self.name, bad_rows)
+        self.report.policy.summarize_bad_rows(self.name, bad_rows)

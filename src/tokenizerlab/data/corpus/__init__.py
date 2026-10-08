@@ -16,6 +16,7 @@ from tokenizerlab.data.corpus.storage import (
     CorpusStore,
     IntegrityError,
     MetadataNotSerializableError,
+    UnsafeDestinationError,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "Step",
     "StepContext",
     "UnreachableMixError",
+    "UnsafeDestinationError",
 ]

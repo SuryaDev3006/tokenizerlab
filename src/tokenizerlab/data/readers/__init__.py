@@ -16,8 +16,10 @@ from tokenizerlab.data.readers.stream import (
     DocumentStream,
     ErrorLevel,
     ErrorPolicy,
+    PassReport,
     ReadError,
     Reuse,
+    SourceTraits,
     StreamConsumedError,
 )
 
@@ -31,6 +33,7 @@ __all__ = [
     "IterableHandler",
     "OnError",
     "Parser",
+    "PassReport",
     "PathHandler",
     "ReadError",
     "ReadOptions",
@@ -40,6 +43,7 @@ __all__ = [
     "SourceHandler",
     "SourceNotFoundError",
     "SourceResolver",
+    "SourceTraits",
     "StreamConsumedError",
     "Unit",
     "UnsupportedFormatError",

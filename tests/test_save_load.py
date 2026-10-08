@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 
 from tokenizerlab import Corpus, Document, read
-from tokenizerlab.data.corpus import CorpusExistsError, IntegrityError, MetadataNotSerializableError
+from tokenizerlab.data.corpus import (
+    CorpusExistsError,
+    IntegrityError,
+    MetadataNotSerializableError,
+    UnsafeDestinationError,
+)
 from tokenizerlab.data.stats import UnsupportedManifestVersionError
 
 pyarrow = pytest.importorskip("pyarrow")
@@ -49,7 +54,11 @@ def test_round_trip_and_tampering(tmp_path: Path) -> None:
 
 def test_manifest_records_how_the_corpus_was_built(tmp_path: Path) -> None:
     """History, per-step counts, files and stats; identical across saves but for run details."""
-    corpus = Corpus(read(["a", "b", "a"], name="toy")).dedup()
+    data = tmp_path / "data"
+    data.mkdir()
+    for name, text in {"1.txt": "a", "2.txt": "b", "3.txt": "a"}.items():
+        (data / name).write_text(text, encoding="utf-8")
+    corpus = Corpus(read(data, name="toy")).dedup()
     corpus.save(tmp_path / "first")
     corpus.save(tmp_path / "second")
     manifest = _manifest(tmp_path / "first")
@@ -166,3 +175,54 @@ def test_failed_save_leaves_nothing_behind(tmp_path: Path) -> None:
     with pytest.raises(MetadataNotSerializableError, match=document.id):
         Corpus(read([document], name="bad")).save(tmp_path / "bad")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_in_memory_sources_are_not_reproducible(tmp_path: Path) -> None:
+    """A corpus read from a Python list cannot be recreated from its manifest."""
+    Corpus(read(["a", "b"], name="toy")).save(tmp_path / "out")
+    manifest = _manifest(tmp_path / "out")
+
+    assert manifest["history"][0]["reproducible"] is False
+    assert manifest["reproducible"] is False
+
+
+def test_sampling_stays_independent_across_save_and_load(tmp_path: Path) -> None:
+    """A sample after loading keeps about half of a previously sampled corpus, not all of it."""
+    texts = [f"document {i}" for i in range(10_000)]
+    Corpus(read(texts, name="toy")).sample(0.5, seed=0).save(tmp_path / "v1")
+    loaded = Corpus.load(tmp_path / "v1")
+    loaded.sample(0.5, seed=0).save(tmp_path / "v2")
+    resampled = Corpus.load(tmp_path / "v2").sample(0.5, seed=0)
+
+    first = sum(1 for _ in loaded)
+    assert sum(1 for _ in loaded.sample(0.5, seed=0)) == pytest.approx(first / 2, rel=0.06)
+    assert sum(1 for _ in resampled) == pytest.approx(first / 4, rel=0.1)  # two loads deep
+
+
+def test_save_never_replaces_source_data(tmp_path: Path) -> None:
+    """save() refuses destinations that overlap what it reads or that are not saved corpora."""
+    raw = tmp_path / "rawdata"
+    raw.mkdir()
+    (raw / "a.txt").write_text("precious", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "notes.txt").write_text("keep me", encoding="utf-8")
+    corpus = Corpus(read(raw))
+
+    for destination in (raw, raw / "inside", tmp_path):
+        with pytest.raises(UnsafeDestinationError, match="overlaps"):
+            corpus.save(destination, overwrite=True)
+    with pytest.raises(UnsafeDestinationError, match="not a saved tokenizerlab corpus"):
+        corpus.save(other, overwrite=True)
+
+    assert (raw / "a.txt").read_text(encoding="utf-8") == "precious"
+    assert (other / "notes.txt").read_text(encoding="utf-8") == "keep me"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["other", "rawdata"]
+
+
+def test_overwrite_replaces_a_saved_corpus(tmp_path: Path) -> None:
+    """overwrite=True does replace a directory that is a saved corpus."""
+    Corpus(read(["old"], name="toy")).save(tmp_path / "out")
+    Corpus(read(["new"], name="toy")).save(tmp_path / "out", overwrite=True)
+
+    assert [doc.text for doc in Corpus.load(tmp_path / "out")] == ["new"]
