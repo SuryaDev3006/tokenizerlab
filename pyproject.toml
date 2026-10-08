@@ -3,7 +3,7 @@ name = "tokenizerlab"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
@@ -16,9 +16,65 @@ hf = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.168.5",
+    "mypy>=2.4.0",
+    "pre-commit>=4.6.2",
+    "pyarrow>=25.0.1",
     "pytest>=9.1.1",
+    "ruff>=0.16.10",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tokenizerlab"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import order
+    "N",        # naming
+    "B",        # bugbear
+    "UP",       # modern syntax
+    "SIM",      # simplifications
+    "C90",      # cyclomatic complexity
+    "PL",       # pylint: argument, branch and statement limits
+    "FBT",      # boolean traps
+    "BLE",      # blind except
+    "RUF",
+]
+ignore = [
+    "PLR2004",  # magic values: constants that only appear once read better inline
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 10
+max-statements = 60
+max-nested-blocks = 3
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR0915", "FBT"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*", "datasets.*", "huggingface_hub.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
