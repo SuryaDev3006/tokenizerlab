@@ -145,6 +145,7 @@ class Mix:
 
     def apply(self, documents: Iterator[Document], context: StepContext) -> Iterator[Document]:
         """Yield each language's documents with probability equal to its keep fraction."""
+        require_language_tags(context.bytes_by_lang)
         available_bytes = tagged_bytes(context.bytes_by_lang)
         target_shares = self.shares.target_shares(available_bytes)
         keep_fractions = downsampling_fractions(target_shares, available_bytes, self.max_bytes)
@@ -169,6 +170,18 @@ class Mix:
 
 
 # ---------------------------------------------------------------- pure share arithmetic
+
+
+def require_language_tags(bytes_by_lang: Mapping[str | None, int]) -> None:
+    """Refuse to mix documents that carry no language tags at all.
+
+    Untagged documents are dropped by mix, so without this check a corpus read without
+    lang= or lang_field= would silently mix down to nothing.
+    """
+    if None in bytes_by_lang and not tagged_bytes(bytes_by_lang):
+        raise UnreachableMixError(
+            "mix found no documents with a language tag; set lang= or lang_field= when reading."
+        )
 
 
 def tagged_bytes(bytes_by_lang: Mapping[str | None, int]) -> dict[str, int]:

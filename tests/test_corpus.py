@@ -132,3 +132,13 @@ def test_texts_is_re_iterable() -> None:
     """A trainer can make several passes over texts() and sees the same texts each time."""
     texts = Corpus(read(["a", "b", "a"], name="toy")).dedup().texts()
     assert list(texts) == list(texts) == ["a", "b"]
+
+
+def test_mix_explains_missing_language_tags() -> None:
+    """Mixing untagged documents raises a clear error instead of returning nothing."""
+    untagged = Corpus(read(["a", "b"], name="toy"))
+
+    for mixed in (untagged.mix(alpha=0.3), untagged.mix(weights={"en": 1})):
+        with pytest.raises(UnreachableMixError, match="no documents with a language tag"):
+            list(mixed)
+    assert list(Corpus(read([], name="empty")).mix(alpha=0.3)) == []  # nothing to mix is fine
