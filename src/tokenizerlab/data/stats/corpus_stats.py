@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from tokenizerlab.data.document import UNDETERMINED_LANG, Document
+from tokenizerlab.data.stats.display import render_html, render_text
 from tokenizerlab.shared.hashing import incremental_digest, utf8_size
 from tokenizerlab.shared.source_names import source_group
 
@@ -77,6 +78,9 @@ class CorpusStats:
 
     Bytes are UTF-8 with surrogatepass, matching how Document hashes text. Lengths are in
     characters and None for an empty corpus.
+
+    print(stats) shows readable tables, and a notebook renders them as HTML; repr(stats),
+    the fields and to_dict() stay the exact, programmatic view.
     """
 
     documents: int
@@ -89,6 +93,14 @@ class CorpusStats:
     by_source: dict[str, Counts]  # grouped by the first path component of the source
     steps: tuple[StepCounts, ...]
     fingerprint: str
+
+    def __str__(self) -> str:
+        """Readable, aligned tables, e.g. for print(stats)."""
+        return render_text(self)
+
+    def _repr_html_(self) -> str:
+        """HTML tables, which Jupyter shows when stats is the last expression in a cell."""
+        return render_html(self)
 
     def to_dict(self) -> dict[str, Any]:
         """A JSON-ready dict."""
