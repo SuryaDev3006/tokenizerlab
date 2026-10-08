@@ -4,7 +4,27 @@ version = "0.1.0"
 description = "Reproducible tokenizer experiments: deterministic, inspectable corpus building for tokenizer training."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Surya Teja Manthri" }]
+keywords = ["tokenizer", "tokenization", "bpe", "byte-pair-encoding", "nlp", "llm", "multilingual", "corpus"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/SuryaDev3006/tokenizerlab"
+Repository = "https://github.com/SuryaDev3006/tokenizerlab"
+Issues = "https://github.com/SuryaDev3006/tokenizerlab/issues"
 
 [project.optional-dependencies]
 # Floors are the oldest releases that have the APIs used and wheels for Python 3.11.
@@ -27,7 +47,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
