@@ -217,10 +217,22 @@ class SavedManifest:
     history: list[dict[str, Any]]
     parent: dict[str, Any] | None
     reproducible: bool
+    # History steps that led here, across every saved ancestor. A loaded corpus continues
+    # the step numbering from here, so its selection hashes never repeat earlier steps'.
+    steps_so_far: int
 
     def as_parent(self) -> ParentInfo:
         """How a corpus loaded from this manifest records where it came from."""
         return ParentInfo(self.stats.fingerprint, self.history, self.parent, self.reproducible)
+
+
+def chain_length(history: list[dict[str, Any]], parent: dict[str, Any] | None) -> int:
+    """The number of history entries in a manifest plus all of its recorded parents."""
+    total = len(history)
+    while parent is not None:
+        total += len(parent["history"])
+        parent = parent["parent"]
+    return total
 
 
 def decode_manifest(text: str, origin: str) -> SavedManifest:
@@ -234,11 +246,13 @@ def decode_manifest(text: str, origin: str) -> SavedManifest:
     _check_format_version(origin, data.get("format_version"))
 
     try:
+        history = list(data["history"])
         return SavedManifest(
             stats=CorpusStats.from_dict(data["stats"]),
-            history=list(data["history"]),
+            history=history,
             parent=data["parent"],
             reproducible=bool(data["reproducible"]),
+            steps_so_far=chain_length(history, data["parent"]),
         )
     except (KeyError, TypeError) as error:
         raise ManifestError(f"{origin}: malformed corpus manifest ({error!r})") from None
