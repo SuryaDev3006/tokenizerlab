@@ -1,3 +1,5 @@
+"""Saving and loading corpora: manifests, verification, provenance and safe destinations."""
+
 import json
 import os
 from collections.abc import Callable
@@ -13,7 +15,7 @@ from tokenizerlab.data.corpus import (
     MetadataNotSerializableError,
     UnsafeDestinationError,
 )
-from tokenizerlab.data.stats import UnsupportedManifestVersionError
+from tokenizerlab.data.stats import ManifestError, UnsupportedManifestVersionError
 
 pyarrow = pytest.importorskip("pyarrow")
 parquet = pytest.importorskip("pyarrow.parquet")
@@ -172,6 +174,41 @@ def test_unknown_format_version_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(UnsupportedManifestVersionError):
         Corpus.load(directory)
+
+
+@pytest.mark.parametrize(
+    ("manifest_text", "message"),
+    [
+        (None, "no manifest"),
+        ("not json", "not valid JSON"),
+        ("[]", "not a tokenizerlab corpus manifest"),
+        ('{"format_version": 1}', "malformed corpus manifest"),
+    ],
+)
+def test_load_rejects_a_directory_that_is_not_a_saved_corpus(
+    tmp_path: Path,
+    manifest_text: str | None,
+    message: str,
+) -> None:
+    """A missing, unparsable or incomplete manifest.json fails at load() with ManifestError."""
+    if manifest_text is not None:
+        (tmp_path / "manifest.json").write_text(manifest_text, encoding="utf-8")
+    with pytest.raises(ManifestError, match=message):
+        Corpus.load(tmp_path)
+
+
+def test_verify_checks_the_fingerprint_and_can_be_turned_off(tmp_path: Path) -> None:
+    """A fingerprint that does not match the rows fails a verified pass; verify=False trusts
+    the rows and loads them as they are."""
+    directory = tmp_path / "out"
+    Corpus(read(["a", "b"], name="toy")).save(directory)
+    manifest = _manifest(directory)
+    manifest["stats"]["fingerprint"] = "0" * 32
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(IntegrityError, match="does not match the manifest"):
+        list(Corpus.load(directory))
+    assert [doc.text for doc in Corpus.load(directory, verify=False)] == ["a", "b"]
 
 
 def test_failed_save_leaves_nothing_behind(tmp_path: Path) -> None:
