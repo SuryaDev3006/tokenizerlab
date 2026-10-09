@@ -20,8 +20,10 @@ from tokenizerlab.data.stats.manifest import (
     SelectionReport,
     StepRecord,
     UnsupportedManifestVersionError,
+    chain_is_reproducible,
     decode_manifest,
     encode_manifest,
+    recorded_history,
 )
 
 __all__ = [
@@ -41,6 +43,8 @@ __all__ = [
     "StepCounts",
     "StepRecord",
     "UnsupportedManifestVersionError",
+    "chain_is_reproducible",
     "decode_manifest",
     "encode_manifest",
+    "recorded_history",
 ]

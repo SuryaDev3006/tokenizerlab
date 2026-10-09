@@ -1,4 +1,4 @@
-"""Where Dedup keeps the content digests it has already seen during a pass.
+"""Where Dedup keeps the digests (content hashes or near-duplicate keys) of a pass.
 
 The in-memory set is the fastest and costs about 100 MB per million unique documents. The
 on-disk store keeps the digests in a private temporary SQLite database instead, so memory
@@ -14,14 +14,21 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
-FirstSighting = Callable[[bytes], bool]  # records a digest; True the first time it is seen
+
+@dataclass(frozen=True, slots=True)
+class DigestIndex:
+    """One pass's record of digests. Asking and adding are separate, so a document with
+    several keys can check all of them before adding any."""
+
+    seen: Callable[[bytes], bool]
+    add: Callable[[bytes], None]
 
 
 class DigestStore(Protocol):
     """Where a dedup pass keeps the digests it has seen: the part of dedup that varies."""
 
-    def open_pass(self) -> AbstractContextManager[FirstSighting]:
-        """An empty record of seen digests for one pass, released when the pass ends."""
+    def open_pass(self) -> AbstractContextManager[DigestIndex]:
+        """An empty record of digests for one pass, released when the pass ends."""
         ...
 
 
@@ -30,18 +37,10 @@ class InMemoryDigests:
     """Seen digests in a Python set: fast, about 100 MB per million unique documents."""
 
     @contextmanager
-    def open_pass(self) -> Iterator[FirstSighting]:
+    def open_pass(self) -> Iterator[DigestIndex]:
         """A fresh set for this pass."""
-        seen: set[bytes] = set()
-
-        def first_sighting(digest: bytes) -> bool:
-            """Add the digest; True if the set did not hold it yet."""
-            if digest in seen:
-                return False
-            seen.add(digest)
-            return True
-
-        yield first_sighting
+        digests: set[bytes] = set()
+        yield DigestIndex(seen=digests.__contains__, add=digests.add)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +48,7 @@ class OnDiskDigests:
     """Seen digests in a private temporary SQLite database: flat memory, but slower."""
 
     @contextmanager
-    def open_pass(self) -> Iterator[FirstSighting]:
+    def open_pass(self) -> Iterator[DigestIndex]:
         """A fresh database for this pass, closed (and so deleted) however the pass ends."""
         database = sqlite3.connect("")  # "": a temporary on-disk database, deleted on close
         try:
@@ -58,12 +57,16 @@ class OnDiskDigests:
             database.execute("PRAGMA synchronous=OFF")
             database.execute("CREATE TABLE seen (digest BLOB PRIMARY KEY) WITHOUT ROWID")
 
-            def first_sighting(digest: bytes) -> bool:
-                """Insert the digest; True if the table did not hold it yet."""
-                insert = database.execute("INSERT OR IGNORE INTO seen VALUES (?)", (digest,))
-                return insert.rowcount == 1
+            def seen(digest: bytes) -> bool:
+                """Whether the table holds the digest."""
+                query = database.execute("SELECT 1 FROM seen WHERE digest = ?", (digest,))
+                return query.fetchone() is not None
 
-            yield first_sighting
+            def add(digest: bytes) -> None:
+                """Insert the digest; adding one twice keeps a single row."""
+                database.execute("INSERT OR IGNORE INTO seen VALUES (?)", (digest,))
+
+            yield DigestIndex(seen=seen, add=add)
         finally:
             database.close()
 

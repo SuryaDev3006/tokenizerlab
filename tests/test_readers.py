@@ -346,7 +346,24 @@ def test_hub_datasets_are_pinned_or_warned() -> None:
     with pytest.warns(UserWarning, match="unpinned") as caught:
         list(Corpus(offline).sample(max_bytes=10))  # a pre-pass, then the main pass
     assert len(caught) == 1
+    assert Path(caught[0].filename) == Path(__file__)
     assert not offline.reproducible
+
+
+def test_warnings_point_at_the_code_that_reads(tmp_path: Path) -> None:
+    """Skipped-file, failed-file and bad-row warnings name the line of user code that read,
+    whether it iterates the stream itself or a corpus over it."""
+    _write(
+        tmp_path,
+        {"d.jsonl": b'{"text": "a"}\nnot json\n', "bad.jsonl.gz": b"not gzip", "x.md": b"md"},
+    )
+    with pytest.warns(UserWarning) as direct:
+        list(read(tmp_path))
+    with pytest.warns(UserWarning) as through_corpus:
+        list(Corpus(read(tmp_path)).sample(max_bytes=10))
+
+    assert len(direct) == len(through_corpus) == 3
+    assert {Path(warning.filename) for warning in [*direct, *through_corpus]} == {Path(__file__)}
 
 
 def test_only_sources_that_can_be_read_again_are_reproducible(tmp_path: Path) -> None:

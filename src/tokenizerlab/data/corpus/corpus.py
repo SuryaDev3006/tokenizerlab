@@ -13,13 +13,16 @@ from __future__ import annotations
 import copy
 import os
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from tokenizerlab.data.corpus.digests import digest_store
 from tokenizerlab.data.corpus.mixing import Mix, share_strategy
+from tokenizerlab.data.corpus.split import Split, check_dedup_after_split, check_new_split
 from tokenizerlab.data.corpus.steps import (
+    Against,
     Dedup,
     DocumentPredicate,
     Filter,
@@ -48,11 +51,14 @@ from tokenizerlab.data.stats import (
     StatsAccumulator,
     StepCounts,
     StepRecord,
+    chain_is_reproducible,
+    recorded_history,
 )
-from tokenizerlab.errors import TokenizerLabError
+from tokenizerlab.errors import ConfigurationError, TokenizerLabError
 from tokenizerlab.shared.hashing import utf8_size
 
 PathLike = str | os.PathLike[str]
+DEFAULT_THRESHOLD = 0.75  # FineWeb's near-duplicate threshold
 
 
 class IncompletePassError(TokenizerLabError):
@@ -92,13 +98,42 @@ class Corpus:
         """Keep non-blank documents with at least min_chars characters that fn(doc) accepts."""
         return self._then(Filter(fn=fn, min_chars=min_chars))
 
-    def dedup(self, *, on_disk: bool = False) -> Corpus:
-        """Drop exact duplicates by content_hash, keeping the first occurrence.
+    def dedup(
+        self,
+        *,
+        near: bool = False,
+        threshold: float = DEFAULT_THRESHOLD,
+        against: Corpus | None = None,
+        on_disk: bool = False,
+    ) -> Corpus:
+        """Drop duplicates, keeping the first occurrence: exact copies by content_hash, or
+        with near=True also near-duplicates at `threshold` (see near.py).
 
-        on_disk=True keeps the digests seen so far in a temporary SQLite database instead of
-        memory (about 100 MB per million unique documents); the result is identical.
+        against= also drops every document that matches a document of that corpus, e.g.
+        train.dedup(against=validation) after a split; the train side of a split needs it.
+        on_disk=True keeps the keys seen so far in a temporary SQLite database instead of
+        memory; the result is identical.
         """
-        return self._then(Dedup(digest_store(on_disk=on_disk)))
+        if not near and threshold != DEFAULT_THRESHOLD:
+            raise ConfigurationError("threshold only applies to dedup(near=True)")
+        if against is None:
+            check_dedup_after_split(self._recorded_history(), near=near)
+        against_documents = None if against is None else against._as_against()
+        store = digest_store(on_disk=on_disk)
+        return self._then(Dedup(store, threshold if near else None, against_documents))
+
+    def split(
+        self,
+        *,
+        validation: float,
+        seed: int = 0,
+        by: str | Callable[[Document], str] = "content",
+    ) -> tuple[Corpus, Corpus]:
+        """(train, validation): each document goes to exactly one side, decided by its key
+        (by="content", "source" or a function) and the seed alone."""
+        check_new_split(self._recorded_history(), seed)
+        train = self._then(Split(validation, seed, by, side="train"))
+        return train, self._then(Split(validation, seed, by, side="validation"))
 
     def sample(
         self,
@@ -145,7 +180,8 @@ class Corpus:
     def _documents(self, shown_warnings: set[str]) -> Iterator[Document]:
         """One pass whose reads, pre-passes included, skip warnings in `shown_warnings`."""
         self._run_prepasses(shown_warnings)
-        context = StepContext(self._step_index, self._bytes_by_lang or Counter())
+        bytes_by_lang = self._bytes_by_lang or Counter()
+        context = StepContext(self._step_index, bytes_by_lang, shown_warnings=shown_warnings)
 
         documents_out = bytes_out = 0
         for document in self._step_output(context, shown_warnings):
@@ -216,6 +252,24 @@ class Corpus:
         if self._entry is not None:
             return self._entry
         return HistoryEntry("read", self._stream.config, self._stream.reproducible)
+
+    def _recorded_history(self) -> list[dict[str, Any]]:
+        """Every history entry as a manifest records it, oldest first, including those of the
+        saved corpora a loaded corpus came from."""
+        parent_info = self._lineage()[0]._parent_info
+        saved = (
+            [] if parent_info is None else recorded_history(parent_info.history, parent_info.parent)
+        )
+        return saved + [entry.to_dict() for entry in self.history]
+
+    def _as_against(self) -> Against:
+        """This corpus as the `against` of another corpus's dedup."""
+        history = self.history
+        return Against(
+            documents=self._documents,
+            history=[entry.to_dict() for entry in history],
+            reproducible=chain_is_reproducible(history, self._lineage()[0]._parent_info),
+        )
 
     def source_paths(self) -> tuple[Path, ...]:
         """The filesystem paths this corpus reads; save() refuses to write over them."""

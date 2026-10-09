@@ -12,6 +12,7 @@ import pytest
 from tokenizerlab import ConfigurationError, Corpus, CorpusStats, Document, read
 from tokenizerlab.data.corpus import (
     Dedup,
+    DigestIndex,
     IncompletePassError,
     OnDiskDigests,
     StepContext,
@@ -206,18 +207,18 @@ def test_abandoned_on_disk_dedup_pass_raises_nothing() -> None:
 
 
 class _RecordingDigests:
-    """OnDiskDigests that keeps each pass's record function, to check it afterwards."""
+    """OnDiskDigests that keeps each pass's index, to check it afterwards."""
 
     def __init__(self) -> None:
         """Start with no passes."""
-        self.passes: list[Callable[[bytes], bool]] = []
+        self.passes: list[DigestIndex] = []
 
     @contextmanager
-    def open_pass(self) -> Iterator[Callable[[bytes], bool]]:
-        """Open a real on-disk store and remember its record function."""
-        with OnDiskDigests().open_pass() as first_sighting:
-            self.passes.append(first_sighting)
-            yield first_sighting
+    def open_pass(self) -> Iterator[DigestIndex]:
+        """Open a real on-disk store and remember its index."""
+        with OnDiskDigests().open_pass() as index:
+            self.passes.append(index)
+            yield index
 
 
 def _failing_documents() -> Iterator[Document]:
@@ -241,9 +242,9 @@ def test_on_disk_dedup_closes_each_pass_database() -> None:
     abandoned.close()
 
     assert len(store.passes) == 3
-    for first_sighting in store.passes:
+    for index in store.passes:
         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
-            first_sighting(b"digest")
+            index.seen(b"digest")
 
 
 def test_texts_is_re_iterable() -> None:

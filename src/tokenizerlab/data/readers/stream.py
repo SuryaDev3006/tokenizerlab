@@ -6,7 +6,6 @@ publishes it as `last_pass` once the pass is complete.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum, StrEnum
@@ -16,6 +15,7 @@ from typing import Any, Protocol
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers.options import OnError, ReaderConfig
 from tokenizerlab.errors import TokenizerLabError
+from tokenizerlab.shared.user_warnings import warn_user
 
 RunPass = Callable[["PassReport"], Iterator[Document]]
 
@@ -88,11 +88,6 @@ class ErrorPolicy(Protocol):
         ...
 
 
-# Frames from a policy's notice() up to the code iterating the stream: PassReport.notice,
-# the handler's pass, DocumentStream.__iter__, and then that code.
-_NOTICE_STACKLEVEL = 5
-
-
 class RaisePolicy:
     """on_error="raise": stop reading at the first error."""
 
@@ -110,7 +105,7 @@ class RaisePolicy:
 
     def notice(self, message: str, report: PassReport) -> None:
         """Warn: a notice is not an error, so it never stops the pass."""
-        report.warn(message, stacklevel=_NOTICE_STACKLEVEL)
+        report.warn(message)
 
 
 class SkipPolicy:
@@ -140,7 +135,7 @@ class WarnPolicy:
         """Keep the error; a whole failed file is worth an immediate warning."""
         report.errors.append(error)
         if error.level is ErrorLevel.FILE:
-            report.warn(str(error), stacklevel=4)
+            report.warn(str(error))
 
     def summarize_bad_rows(
         self,
@@ -150,14 +145,11 @@ class WarnPolicy:
     ) -> None:
         """One warning per source rather than one per row."""
         if bad_rows:
-            report.warn(
-                f"{source_name}: skipped {len(bad_rows)} row(s); first: {bad_rows[0]}",
-                stacklevel=5,
-            )
+            report.warn(f"{source_name}: skipped {len(bad_rows)} row(s); first: {bad_rows[0]}")
 
     def notice(self, message: str, report: PassReport) -> None:
         """Warn."""
-        report.warn(message, stacklevel=_NOTICE_STACKLEVEL)
+        report.warn(message)
 
 
 ERROR_POLICIES: dict[OnError, ErrorPolicy] = {
@@ -219,16 +211,16 @@ class PassReport:
         """Report a surprise that is not an error according to the error policy."""
         self.policy.notice(message, self)
 
-    def warn(self, message: str, stacklevel: int) -> None:
+    def warn(self, message: str) -> None:
         """Warn, unless a pass that belongs with this one already showed the same message.
 
         The errors themselves are still recorded by every pass; only the warning is not
-        repeated. `stacklevel` counts from the caller, as in warnings.warn.
+        repeated. The warning names the user's line of code that started the pass.
         """
         if message in self.shown_warnings:
             return
         self.shown_warnings.add(message)
-        warnings.warn(message, stacklevel=stacklevel + 1)
+        warn_user(message)
 
     def absorb(self, other: PassReport) -> None:
         """Add another report's findings, e.g. a chained child's."""

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -309,3 +310,26 @@ def test_failed_overwrite_keeps_the_old_corpus(
 
     assert [doc.text for doc in Corpus.load(destination)] == ["old"]
     assert [path.name for path in tmp_path.iterdir()] == ["out"]
+
+
+def test_a_leftover_after_overwrite_is_reported_at_the_save_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the replaced corpus cannot be deleted, the warning names the user's save() line."""
+    Corpus(read(["old"], name="toy")).save(tmp_path / "out")
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> None:
+        """shutil.rmtree, except that the moved-aside old corpus is locked."""
+        if Path(path).name.startswith(".out.old."):
+            raise OSError("simulated: a file is in use")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    with pytest.warns(UserWarning, match="could not delete the old copy") as caught:
+        Corpus(read(["new"], name="toy")).save(tmp_path / "out", overwrite=True)
+    monkeypatch.undo()
+
+    assert Path(caught[0].filename) == Path(__file__)
+    assert [doc.text for doc in Corpus.load(tmp_path / "out")] == ["new"]

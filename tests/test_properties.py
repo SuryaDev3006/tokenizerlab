@@ -94,3 +94,47 @@ def test_save_and_load_round_trip_any_text(items: list[str]) -> None:
 
         assert [(doc.id, doc.text) for doc in loaded] == [(doc.id, doc.text) for doc in corpus]
         assert loaded.stats().fingerprint == saved.fingerprint
+
+
+repeating_texts = st.lists(st.text(alphabet="ab ", max_size=4), max_size=40)
+word_texts = st.lists(
+    st.lists(st.sampled_from(["a", "b", "c", "D"]), max_size=10).map(" ".join),
+    max_size=30,
+)
+validation_shares = st.floats(min_value=0.01, max_value=0.99)
+
+
+@given(repeating_texts, validation_shares, seeds)
+def test_split_never_puts_one_text_on_both_sides(
+    items: list[str],
+    validation: float,
+    seed: int,
+) -> None:
+    """Repeated texts always land on the same side, and every document lands on one side."""
+    train, held_out = _corpus(items).split(validation=validation, seed=seed)
+    train_texts = {doc.text for doc in train}
+    held_out_texts = {doc.text for doc in held_out}
+
+    assert not train_texts & held_out_texts
+    assert len(list(train)) + len(list(held_out)) == len(items)
+
+
+@settings(deadline=None)
+@given(word_texts)
+def test_near_dedup_keeps_no_identical_texts_and_keeps_the_first(items: list[str]) -> None:
+    """Kept texts are all different, each kept document is its text's first occurrence, and
+    the first document is always kept."""
+    kept = list(_corpus(items).dedup(near=True))
+    kept_texts = [doc.text for doc in kept]
+
+    assert len(kept_texts) == len(set(kept_texts))
+    assert all(items.index(doc.text) == doc.position for doc in kept)
+    assert not items or kept[0].position == 0
+
+
+@settings(max_examples=25, deadline=None)
+@given(word_texts)
+def test_on_disk_near_dedup_keeps_the_same_documents(items: list[str]) -> None:
+    """dedup(near=True, on_disk=True) yields exactly the documents of the in-memory store."""
+    corpus = _corpus(items)
+    assert list(corpus.dedup(near=True, on_disk=True)) == list(corpus.dedup(near=True))

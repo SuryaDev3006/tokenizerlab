@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import platform
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -128,8 +129,14 @@ class Provenance:
     @property
     def reproducible(self) -> bool:
         """False if any step, here or in the parent chain, cannot be re-created from records."""
-        parent_reproducible = self.parent is None or self.parent.reproducible
-        return parent_reproducible and all(entry.reproducible for entry in self.history)
+        return chain_is_reproducible(self.history, self.parent)
+
+
+def chain_is_reproducible(history: Iterable[HistoryEntry], parent: ParentInfo | None) -> bool:
+    """Whether every step of `history`, and of the saved corpus it was loaded from, can be
+    re-created from the records."""
+    parent_reproducible = parent is None or parent.reproducible
+    return parent_reproducible and all(entry.reproducible for entry in history)
 
 
 # ---------------------------------------------------------------- manifest
@@ -226,13 +233,16 @@ class SavedManifest:
         return ParentInfo(self.stats.fingerprint, self.history, self.parent, self.reproducible)
 
 
-def chain_length(history: list[dict[str, Any]], parent: dict[str, Any] | None) -> int:
-    """The number of history entries in a manifest plus all of its recorded parents."""
-    total = len(history)
+def recorded_history(
+    history: list[dict[str, Any]],
+    parent: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """The history entries of a manifest's whole parent chain, then its own, oldest first."""
+    entries = list(history)
     while parent is not None:
-        total += len(parent["history"])
+        entries = parent["history"] + entries
         parent = parent["parent"]
-    return total
+    return entries
 
 
 def decode_manifest(text: str, origin: str) -> SavedManifest:
@@ -252,7 +262,7 @@ def decode_manifest(text: str, origin: str) -> SavedManifest:
             history=history,
             parent=data["parent"],
             reproducible=bool(data["reproducible"]),
-            steps_so_far=chain_length(history, data["parent"]),
+            steps_so_far=len(recorded_history(history, data["parent"])),
         )
     except (KeyError, TypeError) as error:
         raise ManifestError(f"{origin}: malformed corpus manifest ({error!r})") from None

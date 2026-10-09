@@ -6,14 +6,11 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-# From the warning in _delete_old: _swap_in, replace_directory_atomically, contextlib's
-# __exit__, CorpusStore.save and Corpus.save, so the warning points at the user's save().
-_STACKLEVEL_TO_SAVE_CALLER = 7
+from tokenizerlab.shared.user_warnings import warn_user
 
 
 @contextmanager
@@ -73,8 +70,7 @@ def _delete_old(holder: Path, path: Path) -> None:
     try:
         shutil.rmtree(holder)
     except OSError as error:
-        warnings.warn(
+        warn_user(
             f"Replaced {path}, but could not delete the old copy in {holder} ({error}); "
-            "delete it by hand.",
-            stacklevel=_STACKLEVEL_TO_SAVE_CALLER,
+            "delete it by hand."
         )

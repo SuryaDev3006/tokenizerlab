@@ -1,7 +1,7 @@
 """Selection steps: the Step contract, selection hashing, and Filter, Dedup and Sample.
 
 A step only decides which documents to keep. None of them changes text, and none of them
-repeats (upsamples) a document. Mix lives in mixing.py.
+repeats (upsamples) a document. Mix lives in mixing.py and Split in split.py.
 """
 
 from __future__ import annotations
@@ -10,7 +10,8 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from tokenizerlab.data.corpus.digests import DigestStore, InMemoryDigests
+from tokenizerlab.data.corpus.digests import DigestIndex, DigestStore, InMemoryDigests
+from tokenizerlab.data.corpus.near import HASHES, METHOD, NGRAM, banding, near_keys
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.stats import SelectionReport
 from tokenizerlab.errors import ConfigurationError
@@ -26,6 +27,9 @@ class StepContext:
     step_index: int  # position in the history; part of every selection hash
     bytes_by_lang: Mapping[str | None, int]  # measured by the pre-pass; empty if not needed
     result: SelectionReport | None = None
+    # Warnings already shown by this corpus pass; a step that reads another corpus
+    # (dedup against=) shares them, so the same source never warns twice in one pass.
+    shown_warnings: set[str] = field(default_factory=set)
 
 
 class Step(Protocol):
@@ -108,7 +112,7 @@ class Filter:
 
     def parameters(self) -> dict[str, Any]:
         """min_chars, and fn by qualified name ("<lambda>" for a lambda)."""
-        return {"fn": _qualified_name(self.fn), "min_chars": self.min_chars}
+        return {"fn": qualified_name(self.fn), "min_chars": self.min_chars}
 
     def apply(self, documents: Iterator[Document], context: StepContext) -> Iterator[Document]:
         """Yield the documents that pass every check."""
@@ -122,7 +126,7 @@ class Filter:
         return self.fn is None or self.fn(document)
 
 
-def _qualified_name(fn: DocumentPredicate | None) -> str | None:
+def qualified_name(fn: Callable[[Document], object] | None) -> str | None:
     """A function's qualified name; callables without one (e.g. partials) by their type."""
     if fn is None:
         return None
@@ -134,16 +138,49 @@ def _qualified_name(fn: DocumentPredicate | None) -> str | None:
 
 
 @dataclass(frozen=True, slots=True)
-class Dedup:
-    """Drop exact duplicates by content_hash across all sources, keeping the first occurrence.
+class Against:
+    """The documents a dedup must also remove matches of, e.g. the validation side of a
+    split, with that corpus's recorded history."""
 
-    `store` decides where the digests seen so far are kept. The default in-memory set costs
-    about 100 MB per million unique documents (about 10 GB at 100 million); OnDiskDigests
-    keeps them in a temporary SQLite database instead. The store never changes which
-    documents are kept, so it is not recorded in the history.
+    documents: Callable[[set[str]], Iterator[Document]]  # one pass, sharing shown warnings
+    history: list[dict[str, Any]]
+    reproducible: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DedupResult:
+    """How many documents a dedup removed because they matched its `against` corpus."""
+
+    removed_against: int
+
+    def as_record(self) -> dict[str, Any]:
+        """The result as JSON-ready fields."""
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class Dedup:
+    """Drop duplicates across all sources, keeping the first occurrence.
+
+    With `threshold` None, duplicates are exact copies (same content_hash); with a threshold,
+    near-duplicates as defined in near.py, which always include exact copies. A document is
+    dropped only when it matches a document kept earlier in the pass, or any document of
+    `against`, which is read once at the start of the pass.
+
+    `store` decides where the keys seen so far are kept. The default in-memory set costs
+    about 100 MB per million unique documents for exact dedup (about 1.1 GB for near dedup);
+    OnDiskDigests keeps them in a temporary SQLite database instead. The store never changes
+    which documents are kept, so it is not recorded in the history.
     """
 
     store: DigestStore = field(default_factory=InMemoryDigests)
+    threshold: float | None = None
+    against: Against | None = None
+
+    def __post_init__(self) -> None:
+        """A near-duplicate threshold must be in (0, 1)."""
+        if self.threshold is not None and not 0 < self.threshold < 1:
+            raise ConfigurationError(f"threshold must be in (0, 1), got {self.threshold}")
 
     @property
     def name(self) -> str:
@@ -157,21 +194,64 @@ class Dedup:
 
     @property
     def reproducible(self) -> bool:
-        """Dedup has no parameters to lose."""
-        return True
+        """Reproducible unless the `against` corpus is not."""
+        return self.against is None or self.against.reproducible
 
     def parameters(self) -> dict[str, Any]:
-        """Dedup has no parameters."""
-        return {}
+        """Nothing for a plain dedup; the near-duplicate settings and `against` otherwise."""
+        if self.threshold is None and self.against is None:
+            return {}
+        parameters: dict[str, Any] = {"near": self.threshold is not None}
+        if self.threshold is not None:
+            bands, rows = banding(self.threshold)
+            parameters.update(
+                threshold=self.threshold,
+                bands=bands,
+                rows=rows,
+                hashes=HASHES,
+                ngram=NGRAM,
+                method=METHOD,
+            )
+        parameters["against"] = None if self.against is None else self.against.history
+        return parameters
 
     def apply(self, documents: Iterator[Document], context: StepContext) -> Iterator[Document]:
-        """Yield each document whose content has not been seen earlier in this pass."""
-        # The store is closed when the pass ends, fails, or is abandoned midway.
-        with self.store.open_pass() as first_sighting:
+        """Yield each document that matches neither a kept document nor `against`."""
+        # The stores are closed when the pass ends, fails, or is abandoned midway.
+        against_store = self.store if self.against is not None else InMemoryDigests()
+        with self.store.open_pass() as kept, against_store.open_pass() as excluded:
+            self._index_against(excluded, context)
+            removed_against = 0
             for document in documents:
-                # Raw 16-byte digests take about half the memory of 32-character hex strings.
-                if first_sighting(bytes.fromhex(document.content_hash)):
+                keys = self.keys(document)
+                if any(excluded.seen(key) for key in keys):
+                    removed_against += 1
+                elif not any(kept.seen(key) for key in keys):
+                    _add_all(kept, keys)
                     yield document
+
+        if self.against is not None:
+            context.result = DedupResult(removed_against)
+
+    def keys(self, document: Document) -> list[bytes]:
+        """What a duplicate shares with the document: its content hash, or its near keys."""
+        if self.threshold is None:
+            # Raw 16-byte digests take about half the memory of 32-character hex strings.
+            return [bytes.fromhex(document.content_hash)]
+        return near_keys(document.text, *banding(self.threshold))
+
+    def _index_against(self, excluded: DigestIndex, context: StepContext) -> None:
+        """Add the keys of every `against` document to `excluded`."""
+        if self.against is None:
+            return
+        for document in self.against.documents(context.shown_warnings):
+            _add_all(excluded, self.keys(document))
+
+
+def _add_all(index: DigestIndex, keys: list[bytes]) -> None:
+    """Add every key to the index."""
+    for key in keys:
+        index.add(key)
 
 
 # ---------------------------------------------------------------- Sample

@@ -233,8 +233,7 @@ class HubHandler:
             # Warned whatever on_error says: an unpinned read weakens what the manifest promises.
             report.warn(
                 f"Could not pin {dataset} to a commit ({error}); "
-                f"reading revision {options.revision!r} unpinned",
-                stacklevel=4,
+                f"reading revision {options.revision!r} unpinned"
             )
             revision = options.revision
             report.unpinned.append(source_name)

@@ -25,6 +25,17 @@ def digest_hex(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=DIGEST_SIZE).hexdigest()
 
 
+def digest16(data: bytes) -> bytes:
+    """The raw 16-byte BLAKE2b digest of data, for compact keys."""
+    return hashlib.blake2b(data, digest_size=DIGEST_SIZE).digest()
+
+
+def hash64(data: bytes) -> int:
+    """The 8-byte BLAKE2b digest of data as a big-endian integer; unlike hash(), the same in
+    every process."""
+    return int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "big")
+
+
 def incremental_digest() -> "hashlib.blake2b":
     """An empty BLAKE2b-128 hasher, for digests built up piece by piece."""
     return hashlib.blake2b(digest_size=DIGEST_SIZE)
