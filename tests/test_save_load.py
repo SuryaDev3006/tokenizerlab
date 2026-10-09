@@ -1,4 +1,6 @@
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +137,10 @@ def test_broken_file_appears_in_manifest(tmp_path: Path) -> None:
     (data / "bad.jsonl.gz").write_bytes(b"not gzip")
     (data / "notes.md").write_text("unsupported", encoding="utf-8")
 
-    with pytest.warns(UserWarning, match="bad.jsonl.gz"):
+    with (
+        pytest.warns(UserWarning, match="bad.jsonl.gz"),
+        pytest.warns(UserWarning, match=r"skipped 1 file\(s\)"),
+    ):
         Corpus(read(data)).save(tmp_path / "out")
     reader = _manifest(tmp_path / "out")["reader"]
 
@@ -221,8 +226,49 @@ def test_save_never_replaces_source_data(tmp_path: Path) -> None:
 
 
 def test_overwrite_replaces_a_saved_corpus(tmp_path: Path) -> None:
-    """overwrite=True does replace a directory that is a saved corpus."""
+    """overwrite=True replaces a saved corpus and leaves no temporary or backup directory."""
     Corpus(read(["old"], name="toy")).save(tmp_path / "out")
     Corpus(read(["new"], name="toy")).save(tmp_path / "out", overwrite=True)
 
     assert [doc.text for doc in Corpus.load(tmp_path / "out")] == ["new"]
+    assert [path.name for path in tmp_path.iterdir()] == ["out"]
+
+
+RenameFilter = Callable[[Path, Path], bool]
+
+
+def _moves_new_corpus_in(destination: Path) -> RenameFilter:
+    """Matches the rename of the new corpus from its temporary sibling onto the destination."""
+    return lambda source, target: target == destination and source.parent == destination.parent
+
+
+def _moves_old_corpus_aside(destination: Path) -> RenameFilter:
+    """Matches the rename of the old corpus away from the destination (e.g. a locked file)."""
+    return lambda source, target: source == destination
+
+
+@pytest.mark.parametrize("failing_rename", [_moves_new_corpus_in, _moves_old_corpus_aside])
+def test_failed_overwrite_keeps_the_old_corpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_rename: Callable[[Path], RenameFilter],
+) -> None:
+    """If a rename of the swap fails, the old corpus still loads and nothing is left over."""
+    destination = tmp_path / "out"
+    Corpus(read(["old"], name="toy")).save(destination)
+    fails = failing_rename(destination)
+    real_replace = os.replace
+
+    def replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        """os.replace, except for the one rename this test makes fail."""
+        if fails(Path(source), Path(target)):
+            raise OSError("simulated rename failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError, match="simulated rename failure"):
+        Corpus(read(["new"], name="toy")).save(destination, overwrite=True)
+    monkeypatch.undo()
+
+    assert [doc.text for doc in Corpus.load(destination)] == ["old"]
+    assert [path.name for path in tmp_path.iterdir()] == ["out"]
