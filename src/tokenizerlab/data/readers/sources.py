@@ -18,6 +18,8 @@ from tokenizerlab.data.readers.stream import DocumentStream, PassReport, Reuse, 
 from tokenizerlab.errors import ConfigurationError
 from tokenizerlab.shared.source_names import HUB_PREFIX, hub_source_name, is_hub_source
 
+MAX_LISTED_EXTENSIONS = 5  # a skipped-files warning names this many extensions at most
+
 
 class SourceNotFoundError(ConfigurationError):
     """A path given to read() does not exist."""
@@ -140,9 +142,11 @@ class PathHandler:
         prefix = f"{name}/" if name else ""
 
         def run(report: PassReport) -> Iterator[Document]:
-            """Parse each discovered file in order."""
+            """Parse each discovered file in order, after noting skipped files or none found."""
             discovery = self._discovery.discover(path, options)
             report.skipped = [prefix + relative_path for relative_path in discovery.skipped]
+            for notice in _discovery_notices(name or str(path), discovery, options.glob):
+                report.policy.notice(notice)
             for file in discovery.files:
                 file_source = Source(prefix + file.relative_path, options, report)
                 parser = self._formats.parser(file.format)
@@ -155,6 +159,38 @@ class PathHandler:
 
         traits = SourceTraits(paths=(path,))
         return DocumentStream(run, list_source_names, options.on_error, traits)
+
+
+def _discovery_notices(label: str, discovery: Discovery, glob: str | None) -> list[str]:
+    """What a read should say about files it skipped, or about finding nothing to read.
+
+    Skipped files are not errors: they stay out of the error list and the manifest, and the
+    error policy decides only whether the user hears about them.
+    """
+    notices = []
+    if discovery.skipped:
+        notices.append(_skipped_files_notice(label, discovery.skipped))
+    if not discovery.files:
+        matching = f" matching glob {glob!r}" if glob else ""
+        notices.append(f"{label}: found no readable files{matching}; the stream is empty.")
+    return notices
+
+
+def _skipped_files_notice(label: str, skipped: Sequence[str]) -> str:
+    """How many files were skipped, their extensions, and how to read them anyway."""
+    extensions = sorted({_extension(relative_path) for relative_path in skipped})
+    listed = ", ".join(extensions[:MAX_LISTED_EXTENSIONS])
+    if len(extensions) > MAX_LISTED_EXTENSIONS:
+        listed += ", ..."
+    return (
+        f"{label}: skipped {len(skipped)} file(s) with unsupported extensions ({listed}). "
+        "Pass format='text' to read them as raw text, one document per file."
+    )
+
+
+def _extension(relative_path: str) -> str:
+    """A file's last extension in lower case, e.g. ".py"; "(none)" for a name without one."""
+    return PurePosixPath(relative_path).suffix.lower() or "(none)"
 
 
 # ---------------------------------------------------------------- dataset hubs

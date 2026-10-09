@@ -78,6 +78,15 @@ class ErrorPolicy(Protocol):
         """Report a source's bad rows once the source has been read."""
         ...
 
+    def notice(self, message: str) -> None:
+        """Report something that is not an error but may surprise, e.g. skipped files."""
+        ...
+
+
+def _warn_notice(message: str) -> None:
+    """Warn with a notice; stacklevel skips this helper, the policy, the pass and the stream."""
+    warnings.warn(message, stacklevel=5)
+
 
 class RaisePolicy:
     """on_error="raise": stop reading at the first error."""
@@ -89,6 +98,10 @@ class RaisePolicy:
     def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
         """Nothing to summarize: the first bad row already stopped the pass."""
 
+    def notice(self, message: str) -> None:
+        """Warn: a notice is not an error, so it never stops the pass."""
+        _warn_notice(message)
+
 
 class SkipPolicy:
     """on_error="skip": record errors silently."""
@@ -99,6 +112,9 @@ class SkipPolicy:
 
     def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
         """Stay silent; the errors are in the stream's report."""
+
+    def notice(self, message: str) -> None:
+        """Stay silent; skipped files are in the stream's report."""
 
 
 class WarnPolicy:
@@ -118,6 +134,10 @@ class WarnPolicy:
                 f"{source_name}: skipped {len(bad_rows)} row(s); first: {bad_rows[0]}",
                 stacklevel=4,
             )
+
+    def notice(self, message: str) -> None:
+        """Warn."""
+        _warn_notice(message)
 
 
 ERROR_POLICIES: dict[OnError, ErrorPolicy] = {
