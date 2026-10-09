@@ -26,10 +26,12 @@ Requires Python 3.11+.
 from tokenizerlab import Corpus, read
 
 # Read one source per language and tag it
-stream = read([
-    read("data/te", name="te", lang="te"),
-    read("data/en", name="en", lang="en"),
-])
+stream = read(
+    [
+        read("data/te", name="te", lang="te"),
+        read("data/en", name="en", lang="en"),
+    ]
+)
 
 # Build a corpus: drop short documents, remove exact duplicates
 corpus = Corpus(stream).filter(min_chars=5).dedup()
@@ -41,7 +43,7 @@ print(stats.documents, stats.bytes, stats.fingerprint)
 corpus.save("artifacts/te-en-v1")
 corpus = Corpus.load("artifacts/te-en-v1")
 
-for text in corpus.texts():   # plain strings, ready for tokenizer training
+for text in corpus.texts():  # plain strings, ready for tokenizer training
     ...
 ```
 
@@ -68,22 +70,47 @@ into a lazy stream of documents.
   hidden files and folders (`.git`, `.venv`) are skipped.
 - **Robust.** A broken file or row is skipped with a warning
   (`on_error="warn"`), recorded in `stream.errors`, and the rest keeps loading.
-  Errors are complete once a pass has finished.
+  Errors are complete once a pass has finished. Files with unsupported
+  extensions are listed in `stream.skipped` and produce one warning per read,
+  as does a directory with no readable files.
+
+### Training on code and raw files
+
+Dataset formats (JSONL, CSV/TSV, Parquet, Hugging Face) give one document per
+row. Anything read with `format="text"` gives one document per file, with the
+file's exact contents.
+
+So a folder of source code, Markdown or JSON files is read with
+`format="text"`:
+
+```python
+code = read("repo/", format="text", glob="*.py")  # one document per .py file
+table = read("users.csv", format="text")  # the whole CSV file, as written
+config = read("settings.json", format="text")  # the whole JSON file, as written
+```
+
+- A text file with one record per line needs `unit="line"`:
+  `read("lines.txt", unit="line")`.
+- Read dataset files with `text_field` when you want their records, not their
+  syntax: reading a JSONL file with `format="text"` gives JSON-escaped text
+  (`\n`, `\"`, `త`) instead of the records' own text.
 
 ## Building a corpus
 
 Each operation returns a new, lazy `Corpus`; nothing is read until you iterate.
 
 ```python
-sources = read([
-    read("data/te", name="te", lang="te"),
-    read("data/en", name="en", lang="en"),
-])
+sources = read(
+    [
+        read("data/te", name="te", lang="te"),
+        read("data/en", name="en", lang="en"),
+    ]
+)
 
 corpus = (
     Corpus(sources)
-    .filter(min_chars=100)               # also always drops empty documents
-    .dedup()                             # exact duplicates, first occurrence kept
+    .filter(min_chars=100)  # also always drops empty documents
+    .dedup()  # exact duplicates, first occurrence kept
     .sample(max_bytes=5_000_000_000, seed=42)
 )
 
@@ -96,6 +123,11 @@ custom = corpus.mix({"te": 0.5, "en": 0.5}, seed=42)
 Sampling is decided by a seeded hash of each document's id, so it is
 reproducible and independent of input order. Mixing only downsamples, never
 repeats documents.
+
+`dedup()` remembers the content hashes it has seen in memory, about 100 MB per
+million unique documents. For larger corpora, `dedup(on_disk=True)` keeps them
+in a temporary SQLite database instead: the same documents are kept, memory
+stays flat, and it runs slower.
 
 ## Saving and provenance
 
