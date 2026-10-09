@@ -14,11 +14,12 @@ from typing import Any, Protocol, TextIO
 from tokenizerlab.adapters import ParquetPort
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers.options import ReadOptions, Unit
-from tokenizerlab.data.readers.rows import Source
+from tokenizerlab.data.readers.rows import MissingTextFieldError, Source
 from tokenizerlab.errors import ConfigurationError
 
-# The default CSV field limit is 128 KB; documents are often larger.
-csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+# The default CSV field limit is 128 KB; documents are often larger. The cap is the largest
+# value csv accepts on every platform (a C long is 32 bits on Windows).
+CSV_FIELD_LIMIT = min(sys.maxsize, 2**31 - 1)
 
 
 class UnsupportedFormatError(ConfigurationError):
@@ -135,9 +136,17 @@ def _strip_line_ending(line: str) -> str:
     return line
 
 
+def _offering_raw_text(documents: Iterator[Document]) -> Iterator[Document]:
+    """A CSV, TSV or JSONL file can also be read raw, so its missing-text-field error says so."""
+    try:
+        yield from documents
+    except MissingTextFieldError as error:
+        raise error.offering_raw_text() from None
+
+
 def parse_jsonl(path: Path, source: Source) -> Iterator[Document]:
     """Yield one Document per JSON line; blank lines are skipped but still count as positions."""
-    yield from source.documents_from_rows(_json_lines(path, source))
+    yield from _offering_raw_text(source.documents_from_rows(_json_lines(path, source)))
 
 
 def _json_lines(path: Path, source: Source) -> Iterator[tuple[int, Any]]:
@@ -159,9 +168,21 @@ def parse_delimited(path: Path, source: Source) -> Iterator[Document]:
     default_delimiter = "\t" if path.name.lower().endswith(".tsv") else ","
     delimiter = source.options.delimiter or default_delimiter
 
+    _allow_large_csv_fields()
     with _open_text(path, newline="") as file:  # the csv module needs newline=""
         rows = csv.DictReader(file, delimiter=delimiter)
-        yield from source.documents_from_rows(enumerate(rows))
+        yield from _offering_raw_text(source.documents_from_rows(enumerate(rows)))
+
+
+def _allow_large_csv_fields() -> None:
+    """Raise the process-wide CSV field limit to CSV_FIELD_LIMIT if it is lower.
+
+    Done when a CSV file is read, never at import, so importing tokenizerlab leaves the
+    limit alone. The old limit is not restored afterwards: passes are generators that can
+    interleave, and restoring it would break another CSV pass that is still running.
+    """
+    if csv.field_size_limit() < CSV_FIELD_LIMIT:
+        csv.field_size_limit(CSV_FIELD_LIMIT)
 
 
 # ---------------------------------------------------------------- Parquet
