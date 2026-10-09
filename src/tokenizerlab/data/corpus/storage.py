@@ -11,16 +11,13 @@ from __future__ import annotations
 
 import functools
 import json
-import os
-import shutil
-import tempfile
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from tokenizerlab.adapters import ColumnType, ParquetPort, PyArrowParquet, Row
+from tokenizerlab.data.corpus.atomic_directory import replace_directory_atomically
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.readers import DocumentStream, OnError, PassReport, SourceTraits
 from tokenizerlab.data.stats import (
@@ -163,23 +160,6 @@ def _require_saved_corpus(destination: Path) -> None:
             f"Refusing to replace {destination}: it is not a saved tokenizerlab corpus "
             f"(expected only {sorted(corpus_files)})."
         )
-
-
-@contextmanager
-def replace_directory_atomically(path: Path) -> Iterator[Path]:
-    """Yield an empty temporary directory that replaces `path` on success and is deleted on
-    failure, so a crash never leaves a half-written corpus."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Created next to path, so the final rename never crosses filesystems.
-    temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
-    try:
-        yield temporary
-    except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
-    if path.exists():
-        shutil.rmtree(path)
-    os.replace(temporary, path)
 
 
 # ---------------------------------------------------------------- loading strategies
