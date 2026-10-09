@@ -40,6 +40,14 @@ def test_dedup_keeps_the_first_occurrence_of_each_text(items: list[str]) -> None
     assert [doc.text for doc in _corpus(items).dedup()] == list(dict.fromkeys(items))
 
 
+@settings(max_examples=25, deadline=None)
+@given(texts)
+def test_on_disk_dedup_keeps_the_same_documents(items: list[str]) -> None:
+    """dedup(on_disk=True) yields exactly the documents of the in-memory dedup()."""
+    corpus = _corpus(items)
+    assert list(corpus.dedup(on_disk=True)) == list(corpus.dedup())
+
+
 @given(texts, st.integers(min_value=0, max_value=50))
 def test_filter_only_removes_and_never_changes_text(items: list[str], min_chars: int) -> None:
     """filter keeps exactly the non-blank, long-enough texts, unchanged and in order."""

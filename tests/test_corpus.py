@@ -1,11 +1,14 @@
 import json
+import sqlite3
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tokenizerlab import ConfigurationError, Corpus, CorpusStats, Document, read
-from tokenizerlab.data.corpus import UnreachableMixError
+from tokenizerlab.data.corpus import Dedup, OnDiskDigests, StepContext, UnreachableMixError
 from tokenizerlab.data.readers import StreamConsumedError
 
 
@@ -126,6 +129,59 @@ def test_one_shot_source_is_never_silently_empty() -> None:
     one_shot = Corpus(read(iter(_two_languages(10, 10)), name="once")).sample(max_bytes=10)
     with pytest.raises(StreamConsumedError):
         list(one_shot)
+
+
+def test_abandoned_on_disk_dedup_pass_raises_nothing() -> None:
+    """Closing an on-disk dedup pass midway is clean, and the next pass is complete."""
+    corpus = Corpus(read(["a", "b", "a", "c"], name="toy")).dedup(on_disk=True)
+
+    documents = iter(corpus)
+    assert next(documents).text == "a"
+    assert isinstance(documents, Generator)
+    documents.close()
+
+    assert _texts(corpus) == ["a", "b", "c"]
+
+
+class _RecordingDigests:
+    """OnDiskDigests that keeps each pass's record function, to check it afterwards."""
+
+    def __init__(self) -> None:
+        """Start with no passes."""
+        self.passes: list[Callable[[bytes], bool]] = []
+
+    @contextmanager
+    def open_pass(self) -> Iterator[Callable[[bytes], bool]]:
+        """Open a real on-disk store and remember its record function."""
+        with OnDiskDigests().open_pass() as first_sighting:
+            self.passes.append(first_sighting)
+            yield first_sighting
+
+
+def _failing_documents() -> Iterator[Document]:
+    """One document, then a failure."""
+    yield Document("a", "s", 0)
+    raise OSError("source failed")
+
+
+def test_on_disk_dedup_closes_each_pass_database() -> None:
+    """Every pass gets its own database, closed when the pass finishes, fails or is abandoned."""
+    store = _RecordingDigests()
+    dedup = Dedup(store)
+    documents = [Document(text, "s", i) for i, text in enumerate(["a", "b", "a"])]
+
+    assert [doc.text for doc in dedup.apply(iter(documents), StepContext(1, {}))] == ["a", "b"]
+    with pytest.raises(OSError, match="source failed"):
+        list(dedup.apply(_failing_documents(), StepContext(1, {})))
+    abandoned = dedup.apply(iter(documents), StepContext(1, {}))
+    next(abandoned)
+    assert isinstance(abandoned, Generator)
+    abandoned.close()
+
+    assert len(store.passes) == 3
+    for first_sighting in store.passes:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            first_sighting(b"digest")
 
 
 def test_texts_is_re_iterable() -> None:
