@@ -10,6 +10,33 @@ from tokenizerlab.data.readers.options import ReadOptions
 from tokenizerlab.data.readers.stream import ErrorLevel, PassReport, ReadError
 from tokenizerlab.errors import TokenizerLabError
 
+SET_TEXT_FIELD = "set text_field= to the field that holds the text"
+READ_AS_RAW_TEXT = "or pass format='text' to read the whole file as one raw document"
+
+
+class MissingTextFieldError(ReadError):
+    """A source has no text_field, so the whole source fails (level FILE)."""
+
+    def __init__(
+        self,
+        source: str,
+        text_field: str,
+        available_fields: Iterable[Any],
+        fixes: tuple[str, ...] = (SET_TEXT_FIELD,),
+    ):
+        """List the fields the source does have, then how to fix the read."""
+        self.text_field = text_field
+        self.available_fields = tuple(map(str, available_fields))
+        self.fixes = fixes
+        fields = ", ".join(self.available_fields) or "(none)"
+        message = f"field {text_field!r} not found; available fields: {fields}; {', '.join(fixes)}"
+        super().__init__(source, message, level=ErrorLevel.FILE)
+
+    def offering_raw_text(self) -> MissingTextFieldError:
+        """The same error, also suggesting format='text', for a file that can be read raw."""
+        fixes = (*self.fixes, READ_AS_RAW_TEXT)
+        return MissingTextFieldError(self.source, self.text_field, self.available_fields, fixes)
+
 
 class RowParser:
     """Turns the rows (mappings such as JSON objects) of one source into Documents."""
@@ -35,11 +62,10 @@ class RowParser:
             metadata=self._metadata(row),
         )
 
-    def missing_text_field_error(self, available_fields: Iterable[Any]) -> ReadError:
+    def missing_text_field_error(self, available_fields: Iterable[Any]) -> MissingTextFieldError:
         """The file-level error for a text_field that the source does not have."""
-        fields = ", ".join(map(str, available_fields)) or "(none)"
-        message = f"field {self._options.text_field!r} not found; available fields: {fields}"
-        return ReadError(self._source_name, message, level=ErrorLevel.FILE)
+        text_field = self._options.text_field
+        return MissingTextFieldError(self._source_name, text_field, available_fields)
 
     def _check_text_field_once(self, row: Mapping[Any, Any]) -> None:
         """A missing text_field in the first row is almost always a wrong text_field setting,
@@ -136,7 +162,7 @@ class Source:
         """Record one bad row of this source."""
         self.report.record_error(ReadError(self.name, message, position))
 
-    def missing_text_field_error(self, available_fields: Iterable[Any]) -> ReadError:
+    def missing_text_field_error(self, available_fields: Iterable[Any]) -> MissingTextFieldError:
         """The file-level error for a text_field that this source does not have."""
         return self._row_parser.missing_text_field_error(available_fields)
 
