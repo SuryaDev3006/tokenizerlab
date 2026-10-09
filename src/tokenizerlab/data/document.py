@@ -91,6 +91,6 @@ class Document:
         if not isinstance(self.metadata, Mapping):
             raise InvalidDocumentError("metadata must be a mapping")
 
-    def _set_frozen_field(self, name: str, value: Any) -> None:
+    def _set_frozen_field(self, name: str, value: object) -> None:
         """Assign a field on this frozen instance; only valid during __post_init__."""
         object.__setattr__(self, name, value)
