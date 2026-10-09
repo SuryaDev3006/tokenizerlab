@@ -16,7 +16,6 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from tokenizerlab.data.corpus.digests import digest_store
 from tokenizerlab.data.corpus.mixing import Mix, share_strategy
@@ -75,7 +74,7 @@ class Corpus:
     its parent Corpus. Deriving a new Corpus never modifies the existing one.
     """
 
-    def __init__(self, source: Any):
+    def __init__(self, source: object) -> None:
         """Wrap a DocumentStream (anything `read` accepts also works). Nothing is read yet."""
         stream = read(source)
         self._stream = stream
@@ -136,12 +135,20 @@ class Corpus:
     # ---------------------------------------------------------------- passes
 
     def __iter__(self) -> Iterator[Document]:
-        """One pass: run pending pre-passes first, then stream documents through every step."""
-        self._run_prepasses()
+        """One pass: run pending pre-passes first, then stream documents through every step.
+
+        The pre-passes read the same data as the main pass, so they all share one set of
+        shown warnings: each reader warning appears once per pass of this corpus.
+        """
+        return self._documents(set())
+
+    def _documents(self, shown_warnings: set[str]) -> Iterator[Document]:
+        """One pass whose reads, pre-passes included, skip warnings in `shown_warnings`."""
+        self._run_prepasses(shown_warnings)
         context = StepContext(self._step_index, self._bytes_by_lang or Counter())
 
         documents_out = bytes_out = 0
-        for document in self._step_output(context):
+        for document in self._step_output(context, shown_warnings):
             documents_out += 1
             bytes_out += utf8_size(document.text)
             yield document
@@ -149,13 +156,13 @@ class Corpus:
         self._last_output = Counts(documents_out, bytes_out)
         self._last_selection = context.result
 
-    def _step_output(self, context: StepContext) -> Iterator[Document]:
+    def _step_output(self, context: StepContext, shown_warnings: set[str]) -> Iterator[Document]:
         """This node's documents: the source itself, or this node's step applied to its parent."""
         if self._link is None:
-            return iter(self._stream)
-        return self._link.step.apply(iter(self._link.parent), context)
+            return self._stream.one_pass(shown_warnings)
+        return self._link.step.apply(self._link.parent._documents(shown_warnings), context)
 
-    def _run_prepasses(self) -> None:
+    def _run_prepasses(self, shown_warnings: set[str]) -> None:
         """Measure, once, the bytes per language entering every step that needs it, upstream
         first. This finishes before the main pass touches the source, so the reader errors
         reported afterwards come from that one pass."""
@@ -163,14 +170,14 @@ class Corpus:
             return
 
         parent = self._link.parent
-        parent._run_prepasses()
+        parent._run_prepasses(shown_warnings)
         if self._link.step.needs_prepass and self._bytes_by_lang is None:
-            self._bytes_by_lang = parent._bytes_per_language()
+            self._bytes_by_lang = parent._bytes_per_language(shown_warnings)
 
-    def _bytes_per_language(self) -> Counter[str | None]:
+    def _bytes_per_language(self, shown_warnings: set[str]) -> Counter[str | None]:
         """One pass, totalling UTF-8 bytes per language."""
         totals: Counter[str | None] = Counter()
-        for document in self:
+        for document in self._documents(shown_warnings):
             totals[document.lang] += utf8_size(document.text)
         return totals
 
@@ -276,7 +283,7 @@ class Corpus:
 class _Texts:
     """Re-iterable view of a corpus's texts; every iteration re-runs the pipeline."""
 
-    def __init__(self, corpus: Corpus):
+    def __init__(self, corpus: Corpus) -> None:
         """Wrap the corpus whose texts to yield."""
         self._corpus = corpus
 

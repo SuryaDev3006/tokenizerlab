@@ -1,3 +1,5 @@
+"""Corpus operations: filter, dedup, sample, mix, passes and their results."""
+
 import json
 import sqlite3
 from collections.abc import Callable, Generator, Iterator
@@ -8,7 +10,13 @@ from typing import Any
 import pytest
 
 from tokenizerlab import ConfigurationError, Corpus, CorpusStats, Document, read
-from tokenizerlab.data.corpus import Dedup, OnDiskDigests, StepContext, UnreachableMixError
+from tokenizerlab.data.corpus import (
+    Dedup,
+    IncompletePassError,
+    OnDiskDigests,
+    StepContext,
+    UnreachableMixError,
+)
 from tokenizerlab.data.readers import StreamConsumedError
 
 
@@ -122,6 +130,60 @@ def test_mix_never_upsamples_and_rejects_unreachable_targets() -> None:
         list(corpus.mix(weights={"a": 1, "fr": 1}))
     with pytest.raises(ConfigurationError):
         corpus.mix(alpha=1.5)
+
+
+@pytest.mark.parametrize(
+    ("add_step", "message"),
+    [
+        (lambda corpus: corpus.filter(42), "fn must be a function"),
+        (lambda corpus: corpus.sample(1.5), "fraction must be in"),
+        (lambda corpus: corpus.sample(max_bytes=-1), "max_bytes must be >= 0"),
+        (lambda corpus: corpus.mix(), "exactly one of weights or alpha"),
+        (lambda corpus: corpus.mix({"a": 0}), "positive numbers"),
+        (lambda corpus: corpus.mix(alpha=0.5, max_bytes=-1), "max_bytes must be >= 0"),
+    ],
+)
+def test_invalid_step_arguments_fail_when_the_step_is_added(
+    add_step: Callable[[Corpus], Corpus],
+    message: str,
+) -> None:
+    """Bad step arguments raise ConfigurationError at once, before anything is read."""
+    corpus = Corpus(read(["a"], name="toy"))
+    with pytest.raises(ConfigurationError, match=message):
+        add_step(corpus)
+
+
+def test_pass_results_need_a_complete_pass() -> None:
+    """Provenance exists only after a full pass; a pass stopped midway does not count."""
+    corpus = Corpus(read(["a", "b"], name="toy")).dedup()
+    with pytest.raises(IncompletePassError, match="complete pass"):
+        corpus.provenance()
+
+    next(iter(corpus))
+    with pytest.raises(IncompletePassError, match="complete pass"):
+        corpus.provenance()
+
+
+def test_a_prepass_does_not_repeat_reader_warnings(tmp_path: Path) -> None:
+    """A byte-budget sample's pre-pass reads the source too, yet each warning shows once per
+    pass of the corpus, also through a chained read; the next pass warns again."""
+    (tmp_path / "d.jsonl").write_text('{"text": "a"}\nnot json\n', encoding="utf-8")
+    (tmp_path / "bad.jsonl.gz").write_bytes(b"not gzip")
+    (tmp_path / "x.md").write_text("md", encoding="utf-8")
+    sources = read([read(tmp_path, name="toy"), read(["b"], name="memory")])
+    corpus = Corpus(sources).sample(max_bytes=10)
+
+    with pytest.warns(UserWarning) as first_pass:
+        list(corpus)
+    messages = [str(warning.message) for warning in first_pass]
+    assert len(messages) == 3
+    assert messages[0].startswith("toy: skipped 1 file(s)")
+    assert messages[1].startswith("toy/bad.jsonl.gz: BadGzipFile")
+    assert messages[2].startswith("toy/d.jsonl: skipped 1 row(s)")
+
+    with pytest.warns(UserWarning) as second_pass:
+        list(corpus)  # the pre-pass is cached, and a new pass warns afresh
+    assert [str(warning.message) for warning in second_pass] == messages
 
 
 def test_one_shot_source_is_never_silently_empty() -> None:

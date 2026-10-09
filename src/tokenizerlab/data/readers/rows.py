@@ -23,7 +23,7 @@ class MissingTextFieldError(ReadError):
         text_field: str,
         available_fields: Iterable[Any],
         fixes: tuple[str, ...] = (SET_TEXT_FIELD,),
-    ):
+    ) -> None:
         """List the fields the source does have, then how to fix the read."""
         self.text_field = text_field
         self.available_fields = tuple(map(str, available_fields))
@@ -41,7 +41,7 @@ class MissingTextFieldError(ReadError):
 class RowParser:
     """Turns the rows (mappings such as JSON objects) of one source into Documents."""
 
-    def __init__(self, source_name: str, options: ReadOptions):
+    def __init__(self, source_name: str, options: ReadOptions) -> None:
         """Bind the source name and the read options that say which fields to use."""
         self._source_name = source_name
         self._options = options
@@ -125,7 +125,7 @@ class RowParser:
 class Source:
     """One named source during a pass: builds its Documents and records its errors."""
 
-    def __init__(self, name: str, options: ReadOptions, report: PassReport):
+    def __init__(self, name: str, options: ReadOptions, report: PassReport) -> None:
         """Bind the source name, its read options and the report of the current pass."""
         self.name = name
         self.options = options
@@ -182,4 +182,4 @@ class Source:
             self.report.record_error(ReadError(self.name, message, level=ErrorLevel.FILE))
         new_errors = self.report.errors[first_new_error:]
         bad_rows = [error for error in new_errors if error.level is ErrorLevel.ROW]
-        self.report.policy.summarize_bad_rows(self.name, bad_rows)
+        self.report.summarize_bad_rows(self.name, bad_rows)

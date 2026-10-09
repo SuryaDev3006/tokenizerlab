@@ -36,7 +36,7 @@ class ReadError(TokenizerLabError):
         message: str,
         position: int | None = None,
         level: ErrorLevel = ErrorLevel.ROW,
-    ):
+    ) -> None:
         """Format the message as "source#position: message" and keep each part as an attribute."""
         location = source if position is None else f"{source}#{position}"
         super().__init__(f"{location}: {message}")
@@ -70,50 +70,65 @@ class _PassState(Enum):
 class ErrorPolicy(Protocol):
     """What happens to a bad row or file: the part of error handling that varies."""
 
-    def record(self, error: ReadError, errors: list[ReadError]) -> None:
-        """Handle one error as it happens; `errors` is the pass's error list."""
+    def record(self, error: ReadError, report: PassReport) -> None:
+        """Handle one error as it happens: raise it, or keep it in the pass's report."""
         ...
 
-    def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
+    def summarize_bad_rows(
+        self,
+        source_name: str,
+        bad_rows: list[ReadError],
+        report: PassReport,
+    ) -> None:
         """Report a source's bad rows once the source has been read."""
         ...
 
-    def notice(self, message: str) -> None:
+    def notice(self, message: str, report: PassReport) -> None:
         """Report something that is not an error but may surprise, e.g. skipped files."""
         ...
 
 
-def _warn_notice(message: str) -> None:
-    """Warn with a notice; stacklevel skips this helper, the policy, the pass and the stream."""
-    warnings.warn(message, stacklevel=5)
+# Frames from a policy's notice() up to the code iterating the stream: PassReport.notice,
+# the handler's pass, DocumentStream.__iter__, and then that code.
+_NOTICE_STACKLEVEL = 5
 
 
 class RaisePolicy:
     """on_error="raise": stop reading at the first error."""
 
-    def record(self, error: ReadError, errors: list[ReadError]) -> None:
+    def record(self, error: ReadError, report: PassReport) -> None:
         """Raise the error."""
         raise error
 
-    def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
+    def summarize_bad_rows(
+        self,
+        source_name: str,
+        bad_rows: list[ReadError],
+        report: PassReport,
+    ) -> None:
         """Nothing to summarize: the first bad row already stopped the pass."""
 
-    def notice(self, message: str) -> None:
+    def notice(self, message: str, report: PassReport) -> None:
         """Warn: a notice is not an error, so it never stops the pass."""
-        _warn_notice(message)
+        report.warn(message, stacklevel=_NOTICE_STACKLEVEL)
 
 
 class SkipPolicy:
     """on_error="skip": record errors silently."""
 
-    def record(self, error: ReadError, errors: list[ReadError]) -> None:
+    def record(self, error: ReadError, report: PassReport) -> None:
         """Keep the error for the pass's report."""
-        errors.append(error)
+        report.errors.append(error)
 
-    def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
+    def summarize_bad_rows(
+        self,
+        source_name: str,
+        bad_rows: list[ReadError],
+        report: PassReport,
+    ) -> None:
         """Stay silent; the errors are in the stream's report."""
 
-    def notice(self, message: str) -> None:
+    def notice(self, message: str, report: PassReport) -> None:
         """Stay silent; skipped files are in the stream's report."""
 
 
@@ -121,23 +136,28 @@ class WarnPolicy:
     """on_error="warn": record errors, warn at once about failed files and once per source
     about bad rows."""
 
-    def record(self, error: ReadError, errors: list[ReadError]) -> None:
+    def record(self, error: ReadError, report: PassReport) -> None:
         """Keep the error; a whole failed file is worth an immediate warning."""
-        errors.append(error)
+        report.errors.append(error)
         if error.level is ErrorLevel.FILE:
-            warnings.warn(str(error), stacklevel=4)
+            report.warn(str(error), stacklevel=4)
 
-    def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
+    def summarize_bad_rows(
+        self,
+        source_name: str,
+        bad_rows: list[ReadError],
+        report: PassReport,
+    ) -> None:
         """One warning per source rather than one per row."""
         if bad_rows:
-            warnings.warn(
+            report.warn(
                 f"{source_name}: skipped {len(bad_rows)} row(s); first: {bad_rows[0]}",
-                stacklevel=4,
+                stacklevel=5,
             )
 
-    def notice(self, message: str) -> None:
+    def notice(self, message: str, report: PassReport) -> None:
         """Warn."""
-        _warn_notice(message)
+        report.warn(message, stacklevel=_NOTICE_STACKLEVEL)
 
 
 ERROR_POLICIES: dict[OnError, ErrorPolicy] = {
@@ -174,17 +194,41 @@ class PassReport:
     """What one pass learned besides its Documents. Every pass gets its own report, so
     passes that overlap (e.g. zip over two corpora sharing a stream) never mix results."""
 
-    def __init__(self, policy: ErrorPolicy) -> None:
-        """Start an empty report that handles errors with `policy`."""
+    def __init__(self, policy: ErrorPolicy, shown_warnings: set[str]) -> None:
+        """Start an empty report that handles errors with `policy`.
+
+        `shown_warnings` holds the warnings already shown by the passes that this one belongs
+        with (see DocumentStream.one_pass); this pass adds the ones it shows.
+        """
         self.policy = policy
         self.errors: list[ReadError] = []
         self.skipped: list[str] = []  # unsupported files found during discovery
         self.info: dict[str, dict[str, Any]] = {}  # per-source facts, e.g. resolved HF revision
         self.unpinned: list[str] = []  # sources read without an exact revision
+        self.shown_warnings = shown_warnings
 
     def record_error(self, error: ReadError) -> None:
         """Handle one error according to the error policy."""
-        self.policy.record(error, self.errors)
+        self.policy.record(error, self)
+
+    def summarize_bad_rows(self, source_name: str, bad_rows: list[ReadError]) -> None:
+        """Report a source's bad rows according to the error policy."""
+        self.policy.summarize_bad_rows(source_name, bad_rows, self)
+
+    def notice(self, message: str) -> None:
+        """Report a surprise that is not an error according to the error policy."""
+        self.policy.notice(message, self)
+
+    def warn(self, message: str, stacklevel: int) -> None:
+        """Warn, unless a pass that belongs with this one already showed the same message.
+
+        The errors themselves are still recorded by every pass; only the warning is not
+        repeated. `stacklevel` counts from the caller, as in warnings.warn.
+        """
+        if message in self.shown_warnings:
+            return
+        self.shown_warnings.add(message)
+        warnings.warn(message, stacklevel=stacklevel + 1)
 
     def absorb(self, other: PassReport) -> None:
         """Add another report's findings, e.g. a chained child's."""
@@ -209,7 +253,7 @@ class DocumentStream:
         list_source_names: Callable[[], list[str]],
         on_error: OnError,
         traits: SourceTraits | None = None,
-    ):
+    ) -> None:
         """Wrap `run`, which yields one pass of Documents into a PassReport."""
         self._run = run
         self._list_source_names = list_source_names
@@ -217,13 +261,22 @@ class DocumentStream:
         self.error_policy = ERROR_POLICIES[on_error]
         self.traits = traits or SourceTraits()
         self.config: ReaderConfig = {}  # read()'s arguments, recorded in corpus manifests
-        self.last_pass = PassReport(self.error_policy)  # empty until a pass completes
+        self.last_pass = PassReport(self.error_policy, set())  # empty until a pass completes
         self._state = _PassState.READY
 
     def __iter__(self) -> Iterator[Document]:
-        """One pass with its own report, published when the pass is complete."""
+        """One pass with its own report and its own warnings."""
+        return self.one_pass(set())
+
+    def one_pass(self, shown_warnings: set[str]) -> Iterator[Document]:
+        """One pass with its own report, published when the pass is complete.
+
+        Warnings already in `shown_warnings` are not shown again. Passes that read the same
+        data for one result, such as a corpus's pre-pass and its main pass, share one set,
+        so each warning appears once; a pass of its own warns afresh.
+        """
         self._start_pass()
-        report = PassReport(self.error_policy)
+        report = PassReport(self.error_policy, shown_warnings)
         yield from self._run(report)
         self.last_pass = report
 

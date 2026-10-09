@@ -14,7 +14,6 @@ import functools
 import os
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from typing import Any
 
 from tokenizerlab.adapters import HuggingFaceHub, PyArrowParquet
 from tokenizerlab.data.document import Document
@@ -49,7 +48,7 @@ class Reader:
         self._resolver = resolver
         self._formats = formats
 
-    def open(self, source: Any, name: str | None, options: ReadOptions) -> DocumentStream:
+    def open(self, source: object, name: str | None, options: ReadOptions) -> DocumentStream:
         """A stream over a source, or over a list of sources read in order."""
         if isinstance(source, DocumentStream):
             return source
@@ -64,7 +63,7 @@ class Reader:
         stream.config = {"source": _describe(source), "name": name, **options.to_config()}
         return stream
 
-    def _open_several(self, sources: list[Any], options: ReadOptions) -> DocumentStream:
+    def _open_several(self, sources: list[object], options: ReadOptions) -> DocumentStream:
         """Open each source with the same options and chain them in order."""
         children = [self.open(child, None, options) for child in sources]
         stream = chain(children, options.on_error)
@@ -72,7 +71,7 @@ class Reader:
         return stream
 
 
-def _describe(source: Any) -> str:
+def _describe(source: object) -> str:
     """A JSON-friendly description of a source: its path, or the type of iterable."""
     if isinstance(source, (str, os.PathLike)):
         return os.fspath(source)
@@ -91,7 +90,7 @@ def chain(streams: list[DocumentStream], on_error: OnError) -> DocumentStream:
     def run(report: PassReport) -> Iterator[Document]:
         """Yield each stream in turn, then add its pass report to this one."""
         for stream in streams:
-            yield from stream
+            yield from stream.one_pass(report.shown_warnings)
             report.absorb(stream.last_pass)
 
     traits = SourceTraits.combine(stream.traits for stream in streams)
@@ -113,7 +112,7 @@ def default_reader() -> Reader:
 
 
 def read(  # noqa: PLR0913 - the documented keyword API; parsed into ReadOptions at once
-    source: Any,
+    source: object,
     *,
     name: str | None = None,
     format: str | None = None,

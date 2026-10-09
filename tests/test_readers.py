@@ -1,3 +1,5 @@
+"""Readers: files, directories, formats, iterables, hub datasets and read errors."""
+
 import csv
 import gzip
 import json
@@ -9,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from tokenizerlab import ConfigurationError, ReadError, read
-from tokenizerlab.adapters import DatasetRequest, RevisionResolutionError, Row
+from tokenizerlab import ConfigurationError, Corpus, ReadError, read
+from tokenizerlab.adapters import DatasetRequest, RevisionResolutionError, Row, import_optional
 from tokenizerlab.data.readers import (
     DuplicateSourceError,
     FormatRegistry,
@@ -22,6 +24,7 @@ from tokenizerlab.data.readers import (
     StreamConsumedError,
     UnsupportedFormatError,
 )
+from tokenizerlab.errors import MissingDependencyError
 
 
 def _write(root: Path, files: dict[str, bytes]) -> None:
@@ -228,6 +231,36 @@ def test_invalid_arguments_fail_before_reading(tmp_path: Path) -> None:
         read(tmp_path / "missing")
     with pytest.raises(DuplicateSourceError):
         read([tmp_path, tmp_path])
+    with pytest.raises(ConfigurationError, match="text_field must be a non-empty str"):
+        read(tmp_path, text_field="")
+    with pytest.raises(ConfigurationError, match="lang must be None or a non-empty str"):
+        read(tmp_path, lang="")
+    with pytest.raises(ConfigurationError, match="Cannot read a source of type int"):
+        read(42)
+
+
+def test_rows_that_are_not_objects_or_have_a_bad_lang_are_skipped() -> None:
+    """In-memory rows must be mappings, and a lang_field value must be a string."""
+    rows = [{"text": "a"}, 5, {"text": "b", "lang": 3}, {"text": "c", "lang": "te"}]
+    stream = read(rows, name="toy", lang_field="lang", on_error="skip")
+
+    assert [(doc.text, doc.lang) for doc in stream] == [("a", None), ("c", "te")]
+    assert [str(error) for error in stream.errors] == [
+        "toy#1: expected an object/row, got int",
+        "toy#2: field 'lang' is int, expected str",
+    ]
+
+
+def test_a_source_function_must_return_an_iterable() -> None:
+    """A function source that returns a non-iterable fails the pass with a ConfigurationError."""
+    with pytest.raises(ConfigurationError, match="Expected an iterable, got int"):
+        list(read(lambda: 5, name="f"))
+
+
+def test_missing_optional_dependency_names_the_extra() -> None:
+    """A missing optional library fails with the pip command that installs it."""
+    with pytest.raises(MissingDependencyError, match=r"pip install 'tokenizerlab\[parquet\]'"):
+        import_optional("tokenizerlab_no_such_module", extra="parquet")
 
 
 def test_parquet(tmp_path: Path) -> None:
@@ -309,6 +342,11 @@ def test_hub_datasets_are_pinned_or_warned() -> None:
     with pytest.warns(UserWarning, match="unpinned"):
         assert [doc.text for doc in offline] == ["one", "two"]
     assert not offline.reproducible  # the same revision cannot be promised next time
+
+    with pytest.warns(UserWarning, match="unpinned") as caught:
+        list(Corpus(offline).sample(max_bytes=10))  # a pre-pass, then the main pass
+    assert len(caught) == 1
+    assert not offline.reproducible
 
 
 def test_only_sources_that_can_be_read_again_are_reproducible(tmp_path: Path) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -146,7 +145,7 @@ class PathHandler:
             discovery = self._discovery.discover(path, options)
             report.skipped = [prefix + relative_path for relative_path in discovery.skipped]
             for notice in _discovery_notices(name or str(path), discovery, options.glob):
-                report.policy.notice(notice)
+                report.notice(notice)
             for file in discovery.files:
                 file_source = Source(prefix + file.relative_path, options, report)
                 parser = self._formats.parser(file.format)
@@ -215,23 +214,24 @@ class HubHandler:
         def run(report: PassReport) -> Iterator[Document]:
             """Turn the dataset rows into Documents."""
             hub_source = Source(source_name, options, report)
-            request = self._request(dataset, options, report)
+            request = self._request(dataset, hub_source)
             rows = enumerate(self._hub.stream_rows(request))
             yield from hub_source.guard(hub_source.documents_from_rows(rows))
 
         return DocumentStream(run, lambda: [source_name], options.on_error)
 
-    def _request(self, dataset: str, options: ReadOptions, report: PassReport) -> DatasetRequest:
+    def _request(self, dataset: str, source: Source) -> DatasetRequest:
         """The split at its exact commit, so 'the same dataset' stays the same data.
 
-        Records the revision in the report; an unpinned read is warned about and marked,
+        Records the revision in the pass report; an unpinned read is warned about and marked,
         because the manifest cannot promise the same data next time.
         """
-        source_name = hub_source_name(dataset, options.config, options.split)
+        options, report, source_name = source.options, source.report, source.name
         try:
             revision: str | None = self._hub.resolve_revision(dataset, options.revision)
         except RevisionResolutionError as error:
-            warnings.warn(
+            # Warned whatever on_error says: an unpinned read weakens what the manifest promises.
+            report.warn(
                 f"Could not pin {dataset} to a commit ({error}); "
                 f"reading revision {options.revision!r} unpinned",
                 stacklevel=4,
