@@ -1,5 +1,9 @@
+import csv
 import gzip
 import json
+import subprocess
+import sys
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -42,7 +46,10 @@ def test_directory_order_encoding_and_bad_rows(tmp_path: Path) -> None:
     )
 
     stream = read(tmp_path, unit="line", lang="en", lang_field="lang", metadata_fields="all")
-    with pytest.warns(UserWarning, match="skipped 2 row"):  # one warning per source, not per row
+    with (
+        pytest.warns(UserWarning, match="skipped 2 row"),  # one warning per source, not per row
+        pytest.warns(UserWarning, match=r"skipped 1 file\(s\)"),
+    ):
         documents = list(stream)
 
     assert [(doc.source, doc.position, doc.text, doc.lang) for doc in documents] == [
@@ -93,6 +100,110 @@ def test_broken_file_is_warned_and_skipped(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match=r"b\.jsonl\.gz"):
         assert [doc.text for doc in stream] == ["fine", "also fine"]
     assert [(error.source, str(error.level)) for error in stream.errors] == [("b.jsonl.gz", "file")]
+
+
+def test_skipped_files_warn_once_per_pass_with_a_hint(tmp_path: Path) -> None:
+    """Unsupported files give one warning naming their extensions and format='text'; they
+    stay out of the errors and in `skipped`, as before."""
+    repo = tmp_path / "repo"
+    _write(repo, {"a.py": b"x", "b.json": b"{}", "c.md": b"#", "d.py": b"y", "e.txt": b"text"})
+    stream = read(repo)
+
+    with pytest.warns(UserWarning, match="unsupported extensions") as warned:
+        assert [doc.text for doc in stream] == ["text"]
+    assert [str(warning.message) for warning in warned] == [
+        f"{repo}: skipped 4 file(s) with unsupported extensions (.json, .md, .py). "
+        "Pass format='text' to read them as raw text, one document per file."
+    ]
+    assert (stream.errors, stream.skipped) == ([], ["a.py", "b.json", "c.md", "d.py"])
+
+    with pytest.warns(UserWarning, match="unsupported extensions"):
+        list(stream)  # every pass warns again
+
+
+def test_skipped_files_warning_lists_at_most_five_extensions(tmp_path: Path) -> None:
+    """Six different extensions are cut to the first five, then "..."."""
+    _write(tmp_path, {f"file.{extension}": b"x" for extension in "abcdef"} | {"g.txt": b"g"})
+    with pytest.warns(UserWarning, match=r"\(\.a, \.b, \.c, \.d, \.e, \.\.\.\)"):
+        list(read(tmp_path))
+
+
+def test_skipped_files_follow_on_error(tmp_path: Path) -> None:
+    """on_error="skip" stays silent; on_error="raise" warns but does not raise, since a skipped
+    file is not an error."""
+    _write(tmp_path, {"a.py": b"x", "b.txt": b"b"})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert [doc.text for doc in read(tmp_path, on_error="skip")] == ["b"]
+    with pytest.warns(UserWarning, match=r"skipped 1 file\(s\)"):
+        assert [doc.text for doc in read(tmp_path, on_error="raise")] == ["b"]
+
+
+def test_reading_no_readable_files_warns(tmp_path: Path) -> None:
+    """An empty folder, or a glob that matches nothing, warns that the stream is empty."""
+    _write(tmp_path, {"data/a.txt": b"a"})
+    (tmp_path / "empty").mkdir()
+
+    with pytest.warns(UserWarning, match="empty: found no readable files"):
+        assert list(read(tmp_path / "empty", name="empty")) == []
+    with pytest.warns(UserWarning, match=r"no readable files matching glob '\*\.py'"):
+        assert list(read(tmp_path / "data", glob="*.py")) == []
+
+
+def test_missing_text_field_in_csv_or_jsonl_suggests_both_fixes(tmp_path: Path) -> None:
+    """CSV and JSONL errors say to set text_field= or to read the file raw with format='text'."""
+    _write(tmp_path, {"c.csv": b"id,name\r\n1,x\r\n", "d.jsonl": b'{"id": 1}\n'})
+    fixes = (
+        "set text_field= to the field that holds the text, "
+        "or pass format='text' to read the whole file as one raw document"
+    )
+
+    with pytest.raises(ReadError) as csv_error:
+        list(read(tmp_path / "c.csv", on_error="raise"))
+    with pytest.raises(ReadError) as jsonl_error:
+        list(read(tmp_path / "d.jsonl", on_error="raise"))
+
+    assert (
+        str(csv_error.value)
+        == f"c.csv: field 'text' not found; available fields: id, name; {fixes}"
+    )
+    assert (
+        str(jsonl_error.value) == f"d.jsonl: field 'text' not found; available fields: id; {fixes}"
+    )
+
+
+def test_missing_text_field_elsewhere_suggests_only_text_field(tmp_path: Path) -> None:
+    """Parquet files and in-memory rows cannot be read raw, so format='text' is not offered."""
+    pyarrow = pytest.importorskip("pyarrow")
+    parquet = pytest.importorskip("pyarrow.parquet")
+    parquet.write_table(pyarrow.table({"body": ["a"]}), tmp_path / "p.parquet")
+
+    for stream in (
+        read(tmp_path / "p.parquet", on_error="raise"),
+        read([{"body": "a"}], name="rows", on_error="raise"),
+    ):
+        with pytest.raises(ReadError, match="set text_field= to the field") as error:
+            list(stream)
+        assert "format='text'" not in str(error.value)
+
+
+def test_importing_leaves_the_csv_field_limit_alone() -> None:
+    """`import tokenizerlab` does not change Python's process-wide CSV field limit."""
+    script = "import csv, tokenizerlab; print(csv.field_size_limit())"
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, check=True)
+    assert result.stdout.decode().strip() == "131072"
+
+
+def test_csv_fields_larger_than_the_default_limit_are_read(tmp_path: Path) -> None:
+    """A field over csv's default 128 KB limit is read whole, even starting from that default."""
+    text = "y" * 200_000
+    _write(tmp_path, {"big.csv": f"text\n{text}\n".encode()})
+    original_limit = csv.field_size_limit(131072)
+    try:
+        assert [doc.text for doc in read(tmp_path / "big.csv", on_error="raise")] == [text]
+    finally:
+        csv.field_size_limit(original_limit)
 
 
 def test_wrong_text_field_fails_the_file_once(tmp_path: Path) -> None:
