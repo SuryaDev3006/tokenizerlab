@@ -77,6 +77,11 @@ select = [
 ignore = [
     "PLR2004",  # magic values: constants that only appear once read better inline
 ]
+# PLR1702 (too many nested blocks) is still a preview rule. explicit-preview-rules turns on
+# only the preview rules selected by their exact code, so no other preview rule sneaks in.
+preview = true
+explicit-preview-rules = true
+extend-select = ["PLR1702"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 8
