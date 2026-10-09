@@ -1,6 +1,7 @@
 """Corpus: filter, dedup, sample, mix, texts(), save, and load."""
 
 from tokenizerlab.data.corpus.corpus import Corpus, IncompletePassError
+from tokenizerlab.data.corpus.digests import DigestStore, InMemoryDigests, OnDiskDigests
 from tokenizerlab.data.corpus.mixing import Mix, MixResult, UnreachableMixError
 from tokenizerlab.data.corpus.steps import (
     Dedup,
@@ -24,13 +25,16 @@ __all__ = [
     "CorpusExistsError",
     "CorpusStore",
     "Dedup",
+    "DigestStore",
     "DocumentPredicate",
     "Filter",
+    "InMemoryDigests",
     "IncompletePassError",
     "IntegrityError",
     "MetadataNotSerializableError",
     "Mix",
     "MixResult",
+    "OnDiskDigests",
     "Sample",
     "SampleResult",
     "Step",

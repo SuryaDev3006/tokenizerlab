@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tokenizerlab.data.corpus.digests import digest_store
 from tokenizerlab.data.corpus.mixing import Mix, share_strategy
 from tokenizerlab.data.corpus.steps import (
     Dedup,
@@ -92,9 +93,13 @@ class Corpus:
         """Keep non-blank documents with at least min_chars characters that fn(doc) accepts."""
         return self._then(Filter(fn=fn, min_chars=min_chars))
 
-    def dedup(self) -> Corpus:
-        """Drop exact duplicates by content_hash, keeping the first occurrence."""
-        return self._then(Dedup())
+    def dedup(self, *, on_disk: bool = False) -> Corpus:
+        """Drop exact duplicates by content_hash, keeping the first occurrence.
+
+        on_disk=True keeps the digests seen so far in a temporary SQLite database instead of
+        memory (about 100 MB per million unique documents); the result is identical.
+        """
+        return self._then(Dedup(digest_store(on_disk=on_disk)))
 
     def sample(
         self,

@@ -7,9 +7,10 @@ repeats (upsamples) a document. Mix lives in mixing.py.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from tokenizerlab.data.corpus.digests import DigestStore, InMemoryDigests
 from tokenizerlab.data.document import Document
 from tokenizerlab.data.stats import SelectionReport
 from tokenizerlab.errors import ConfigurationError
@@ -136,8 +137,13 @@ def _qualified_name(fn: DocumentPredicate | None) -> str | None:
 class Dedup:
     """Drop exact duplicates by content_hash across all sources, keeping the first occurrence.
 
-    Memory grows by one 16-byte digest per unique document (a few GB at ~100M documents).
+    `store` decides where the digests seen so far are kept. The default in-memory set costs
+    about 100 MB per million unique documents (about 10 GB at 100 million); OnDiskDigests
+    keeps them in a temporary SQLite database instead. The store never changes which
+    documents are kept, so it is not recorded in the history.
     """
+
+    store: DigestStore = field(default_factory=InMemoryDigests)
 
     @property
     def name(self) -> str:
@@ -160,13 +166,12 @@ class Dedup:
 
     def apply(self, documents: Iterator[Document], context: StepContext) -> Iterator[Document]:
         """Yield each document whose content has not been seen earlier in this pass."""
-        # Raw 16-byte digests take about half the memory of 32-character hex strings.
-        seen: set[bytes] = set()
-        for document in documents:
-            digest = bytes.fromhex(document.content_hash)
-            if digest not in seen:
-                seen.add(digest)
-                yield document
+        # The store is closed when the pass ends, fails, or is abandoned midway.
+        with self.store.open_pass() as first_sighting:
+            for document in documents:
+                # Raw 16-byte digests take about half the memory of 32-character hex strings.
+                if first_sighting(bytes.fromhex(document.content_hash)):
+                    yield document
 
 
 # ---------------------------------------------------------------- Sample
