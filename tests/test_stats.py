@@ -1,3 +1,5 @@
+"""CorpusStats: counts, groupings, step counts, the fingerprint and the readable views."""
+
 from pathlib import Path
 
 from tokenizerlab import Corpus, CorpusStats, Document, read

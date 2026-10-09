@@ -1,3 +1,5 @@
+"""Document: exact text, validation, immutability and the two identities."""
+
 from dataclasses import FrozenInstanceError
 from typing import Any
 
