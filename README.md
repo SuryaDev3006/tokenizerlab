@@ -129,6 +129,51 @@ million unique documents. For larger corpora, `dedup(on_disk=True)` keeps them
 in a temporary SQLite database instead: the same documents are kept, memory
 stays flat, and it runs slower.
 
+## Removing duplicates and splitting
+
+Two rules keep a validation set honest:
+
+1. Validation must not share duplicates with training.
+2. Dedup happens before the split, or consistently across the two sides.
+
+The recommended order is read, filter, dedup, sample or mix, split:
+
+```python
+corpus = Corpus(sources).filter(min_chars=100)
+
+corpus.dedup()  # exact duplicates
+corpus.dedup(near=True)  # near-duplicates too (FineWeb's settings)
+train, validation = corpus.dedup(near=True).split(validation=0.02, seed=0)
+
+# Dedup after the split instead: validation keeps every conflict, training loses it.
+train, validation = corpus.split(validation=0.02, seed=0)
+validation = validation.dedup(near=True)
+train = train.dedup(near=True, against=validation)
+```
+
+A document's side depends only on the seed and its content, so identical texts
+always land on the same side, and adding documents or earlier steps never moves
+one. `split(by="source")` (or `by=` a function) keeps whole sources together
+instead; then identical texts in different sources can land on different sides,
+so dedup first or use `against=`. Deduplicating the train side without
+`against=` raises an error, except for exact dedup after a content split.
+
+**What near-duplicate means here.** Texts are compared by their 5-word phrases,
+ignoring case and spacing (MinHash with 112 hashes in 14 bands of 8). At the
+default threshold of 0.75, a copy with about 1% of its words changed is always
+caught, about 3% changed is caught three times in four, and 8% changed almost
+never. `dedup(near=True, threshold=0.9)` drops only very similar texts.
+
+Near dedup is opt-in: more dedup is not always better (FineWeb found that
+global dedup hurt). Its limits:
+
+- It is word-based, so for scripts written without spaces it only finds
+  near-exact copies.
+- Texts under 5 words are compared exactly, ignoring case and spacing.
+- It costs about 1.1 GB of memory per million kept documents, unless
+  `on_disk=True`.
+- It processes a few MB of text per second.
+
 ## Saving and provenance
 
 `corpus.save(path)` writes `corpus.parquet` and a `manifest.json` recording
@@ -143,7 +188,8 @@ from an in-memory list cannot be recreated from the manifest).
 
 ## Roadmap
 
-1. ✅ Data foundation: readers, corpus building, statistics, manifests
+1. ✅ Data foundation: readers, corpus building, near-duplicate dedup, leakage-resistant
+   train/validation split, statistics, manifests
 2. BPE core: normalizers, pre-tokenizers, byte-level BPE trainer
 3. Runtime: encode / decode, special tokens
 4. Saving and loading tokenizers
